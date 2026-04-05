@@ -1,6 +1,6 @@
 pub mod fetch;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anchor_lang_idl_spec::Idl;
@@ -35,6 +35,17 @@ pub struct CachedIdl {
     pub source: IdlSource,
 }
 
+/// Owned parameters needed for async IDL fetch outside the lock.
+///
+/// Cloned from `IdlManager` via `fetch_params()`, used with
+/// `IdlManager::fetch_idl_standalone()`.
+#[derive(Debug, Clone)]
+pub struct IdlFetchParams {
+    pub rpc_url: String,
+    pub http_client: reqwest::Client,
+    pub bundled_idls_path: Option<PathBuf>,
+}
+
 /// IDL manager: caches, parses, and provides IDL data for programs.
 ///
 /// NOTE: AC6 concurrency (safe for concurrent readers) is handled by the
@@ -57,6 +68,10 @@ impl IdlManager {
     }
 
     /// Retrieve an IDL for a program, using cache-first then fetch cascade.
+    ///
+    /// Clones `http_client` and `rpc_url` before async fetch to avoid borrowing
+    /// `&mut self` across `.await` points — this ensures the returned future is
+    /// `Send` when called through `Arc<RwLock<ProgramRegistry>>`.
     pub async fn get_idl(&mut self, program_id: &str) -> Result<&Idl, IdlError> {
         // P10: Use single lookup instead of contains_key + get
         if self.cache.contains_key(program_id) {
@@ -64,35 +79,39 @@ impl IdlManager {
             return Ok(&self.cache[program_id].idl);
         }
 
+        // Clone what we need for async fetch to avoid &mut self borrow across await
+        let client = self.http_client.clone();
+        let rpc_url = self.rpc_url.clone();
+        let bundled_path = self.bundled_idls_path.clone();
+        let pid = program_id.to_string();
+
         // Fetch cascade: on-chain -> bundled (D2: also try bundled on transient errors)
-        let (idl_json, source) =
-            match fetch_idl_from_chain(&self.http_client, &self.rpc_url, program_id).await {
-                Ok(json) => {
-                    info!(program_id, "fetched IDL from on-chain PDA");
-                    (json, IdlSource::OnChain)
-                }
-                Err(IdlError::NotFound(_)) => {
-                    debug!(program_id, "on-chain IDL not found, trying bundled");
-                    let json =
-                        fetch_idl_from_bundled(self.bundled_idls_path.as_deref(), program_id)?;
-                    info!(program_id, "loaded IDL from bundled directory");
-                    (json, IdlSource::Bundled)
-                }
-                Err(e) => {
-                    // D2: On transient fetch errors, try bundled before giving up
-                    warn!(program_id, error = %e, "on-chain fetch failed, trying bundled");
-                    match fetch_idl_from_bundled(self.bundled_idls_path.as_deref(), program_id) {
-                        Ok(json) => {
-                            info!(
-                                program_id,
-                                "loaded IDL from bundled directory (after fetch error)"
-                            );
-                            (json, IdlSource::Bundled)
-                        }
-                        Err(_) => return Err(e), // propagate original fetch error
+        let (idl_json, source) = match fetch_idl_from_chain(&client, &rpc_url, &pid).await {
+            Ok(json) => {
+                info!(program_id = %pid, "fetched IDL from on-chain PDA");
+                (json, IdlSource::OnChain)
+            }
+            Err(IdlError::NotFound(_)) => {
+                debug!(program_id = %pid, "on-chain IDL not found, trying bundled");
+                let json = fetch_idl_from_bundled(bundled_path.as_deref(), &pid)?;
+                info!(program_id = %pid, "loaded IDL from bundled directory");
+                (json, IdlSource::Bundled)
+            }
+            Err(e) => {
+                // D2: On transient fetch errors, try bundled before giving up
+                warn!(program_id = %pid, error = %e, "on-chain fetch failed, trying bundled");
+                match fetch_idl_from_bundled(bundled_path.as_deref(), &pid) {
+                    Ok(json) => {
+                        info!(
+                            program_id = %pid,
+                            "loaded IDL from bundled directory (after fetch error)"
+                        );
+                        (json, IdlSource::Bundled)
                     }
+                    Err(_) => return Err(e), // propagate original fetch error
                 }
-            };
+            }
+        };
 
         // Validate format before parsing into typed struct
         let raw_value: serde_json::Value =
@@ -125,6 +144,11 @@ impl IdlManager {
         self.cache.keys().map(|k| k.as_str()).collect()
     }
 
+    /// Remove a cached IDL entry for a program.
+    pub fn remove_cached(&mut self, program_id: &str) {
+        self.cache.remove(program_id);
+    }
+
     /// Upload an IDL manually: validate, parse, cache with `Manual` source.
     pub fn upload_idl(&mut self, program_id: &str, idl_json: &str) -> Result<&Idl, IdlError> {
         let raw_value: serde_json::Value =
@@ -144,6 +168,82 @@ impl IdlManager {
 
         Ok(&self.cache[program_id].idl)
     }
+
+    /// Clone the fetch parameters needed for a standalone IDL fetch.
+    ///
+    /// This lets the caller drop the lock on `ProgramRegistry`, perform the
+    /// async fetch via `IdlManager::fetch_idl_standalone()`, then re-acquire
+    /// the lock and call `insert_fetched_idl()`.
+    pub fn fetch_params(&self) -> IdlFetchParams {
+        IdlFetchParams {
+            rpc_url: self.rpc_url.clone(),
+            http_client: self.http_client.clone(),
+            bundled_idls_path: self.bundled_idls_path.clone(),
+        }
+    }
+
+    /// Fetch an IDL via the cascade (on-chain -> bundled) without requiring
+    /// `&mut self`. All network and filesystem I/O uses owned parameters.
+    ///
+    /// Returns the raw IDL JSON string and the source it was fetched from.
+    /// The caller should then call `insert_fetched_idl()` under the write lock
+    /// to validate, parse, and cache the result.
+    pub async fn fetch_idl_standalone(
+        params: &IdlFetchParams,
+        program_id: &str,
+    ) -> Result<(String, IdlSource), IdlError> {
+        let pid = program_id.to_string();
+
+        match fetch_idl_from_chain(&params.http_client, &params.rpc_url, &pid).await {
+            Ok(json) => {
+                info!(program_id = %pid, "fetched IDL from on-chain PDA");
+                Ok((json, IdlSource::OnChain))
+            }
+            Err(IdlError::NotFound(_)) => {
+                debug!(program_id = %pid, "on-chain IDL not found, trying bundled");
+                let json = fetch_idl_from_bundled(params.bundled_idls_path.as_deref(), &pid)?;
+                info!(program_id = %pid, "loaded IDL from bundled directory");
+                Ok((json, IdlSource::Bundled))
+            }
+            Err(e) => {
+                // On transient fetch errors, try bundled before giving up
+                warn!(program_id = %pid, error = %e, "on-chain fetch failed, trying bundled");
+                match fetch_idl_from_bundled(params.bundled_idls_path.as_deref(), &pid) {
+                    Ok(json) => {
+                        info!(
+                            program_id = %pid,
+                            "loaded IDL from bundled directory (after fetch error)"
+                        );
+                        Ok((json, IdlSource::Bundled))
+                    }
+                    Err(_) => Err(e), // propagate original fetch error
+                }
+            }
+        }
+    }
+
+    /// Insert a pre-fetched IDL into the cache (validate, parse, hash, cache).
+    ///
+    /// Called under the write lock after `fetch_idl_standalone()` completes.
+    pub fn insert_fetched_idl(
+        &mut self,
+        program_id: &str,
+        idl_json: &str,
+        source: IdlSource,
+    ) -> Result<&Idl, IdlError> {
+        let raw_value: serde_json::Value =
+            serde_json::from_str(idl_json).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
+        validate_idl(&raw_value)?;
+
+        let hash = compute_idl_hash(idl_json);
+        let idl: Idl =
+            serde_json::from_value(raw_value).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
+
+        let cached = CachedIdl { idl, hash, source };
+        self.cache.insert(program_id.to_string(), cached);
+
+        Ok(&self.cache[program_id].idl)
+    }
 }
 
 /// Validate that the IDL JSON has a v0.30+ format (metadata.spec field).
@@ -159,14 +259,36 @@ pub fn validate_idl(value: &serde_json::Value) -> Result<(), IdlError> {
     }
 }
 
+/// Recursively sort all object keys for canonical JSON serialization.
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: serde_json::Map<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, canonicalize_json(v)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect();
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(canonicalize_json).collect())
+        }
+        other => other,
+    }
+}
+
 /// Compute a SHA-256 hash of the IDL JSON for change detection.
 ///
-/// For deterministic hashing, re-parses and re-serializes the JSON through
-/// serde_json::Value to normalize key order, then hashes the result.
+/// For deterministic hashing, canonicalizes JSON by sorting all object keys
+/// recursively before serialization, ensuring identical IDLs with different
+/// key ordering produce the same hash.
 pub fn compute_idl_hash(idl_json: &str) -> String {
-    // Parse and re-serialize for deterministic ordering
     let normalized = match serde_json::from_str::<serde_json::Value>(idl_json) {
-        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| idl_json.to_string()),
+        Ok(value) => {
+            let canonical = canonicalize_json(value);
+            serde_json::to_string(&canonical).unwrap_or_else(|_| idl_json.to_string())
+        }
         Err(_) => idl_json.to_string(),
     };
 

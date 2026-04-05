@@ -364,18 +364,18 @@ Claude Opus 4.6
 
 ### Review Findings
 
-- [ ] [Review][Decision] D1: Cache not safe for concurrent readers (AC6) — `IdlManager` uses `HashMap` + `&mut self`, cannot be shared across async tasks. Add `Arc<RwLock<>>` here or defer to story 2.2?
-- [ ] [Review][Decision] D2: Transient on-chain errors bypass bundled fallback — `FetchFailed` (timeout/429) skips bundled cascade, only `NotFound` triggers it
-- [ ] [Review][Patch] P1: Unbounded zlib decompression (zip bomb) — no max output size [fetch.rs:145-149]
-- [ ] [Review][Patch] P2: Path traversal in `fetch_idl_from_bundled` — `program_id` with `../` escapes `idls/` dir [fetch.rs:162]
-- [ ] [Review][Patch] P3: `FetchFailed` not retryable in pipeline (AC5) — `is_retryable()` misses `Idl(FetchFailed{..})` [pipeline/mod.rs:40-45]
-- [ ] [Review][Patch] P4: No HTTP status check before JSON parse — 429/503 yields opaque error [fetch.rs:44-53]
-- [ ] [Review][Patch] P5: RPC `error: null` causes false FetchFailed — some RPCs set `"error": null` on success [fetch.rs:62-67]
-- [ ] [Review][Patch] P6: Missing `result` key → `NotFound` instead of `FetchFailed` — masks malformed RPC [fetch.rs:70-76]
-- [ ] [Review][Patch] P7: Dead code: unreachable `ok_or_else` after null guard [fetch.rs:78-81]
-- [ ] [Review][Patch] P8: `bs58` unused dependency [Cargo.toml:46]
-- [ ] [Review][Patch] P9: TOCTOU in `fetch_idl_from_bundled` — `exists()` then `read_to_string` race [fetch.rs:164-170]
-- [ ] [Review][Patch] P10: `get_idl` double-lookup — `contains_key` then `get` is redundant [mod.rs:48-54]
+- [x] [Review][Decision] D1: Cache not safe for concurrent readers (AC6) — deferred to story 2.2 (`ProgramRegistry` wraps in `Arc<RwLock<>>`). Doc comment added.
+- [x] [Review][Decision] D2: Transient on-chain errors bypass bundled fallback — FIXED: bundled fallback now tried on any fetch error
+- [x] [Review][Patch] P1: Unbounded zlib decompression (zip bomb) — FIXED: added 16 MiB cap via `.take(MAX_IDL_SIZE)`
+- [x] [Review][Patch] P2: Path traversal in `fetch_idl_from_bundled` — FIXED: validate program_id has no `/`, `\`, or `..`
+- [x] [Review][Patch] P3: `FetchFailed` not retryable in pipeline (AC5) — FIXED: added `Idl(IdlError::FetchFailed{..})` to `is_retryable()`
+- [x] [Review][Patch] P4: No HTTP status check before JSON parse — FIXED: check `response.status()` before `.json()`
+- [x] [Review][Patch] P5: RPC `error: null` causes false FetchFailed — FIXED: skip null error values
+- [x] [Review][Patch] P6: Missing `result` key → `NotFound` instead of `FetchFailed` — FIXED: distinguish missing `result` from null `value`
+- [x] [Review][Patch] P7: Dead code: unreachable `ok_or_else` after null guard — FIXED: removed redundant code
+- [x] [Review][Patch] P8: `bs58` unused dependency — NOT FIXED: `bs58` is used by parallel stories (decoder, rpc)
+- [x] [Review][Patch] P9: TOCTOU in `fetch_idl_from_bundled` — FIXED: read directly, match on `ErrorKind::NotFound`
+- [x] [Review][Patch] P10: `get_idl` double-lookup — FIXED: use direct index after confirmed insert
 - [x] [Review][Defer] W1: Relative path `"idls"` for bundled IDLs — CWD-dependent, breaks in Docker — deferred, config/deploy concern
 - [x] [Review][Defer] W2: `solana-pubkey` v2 vs v3 ecosystem target — deferred, constrained by `anchor-lang-idl-spec` 0.1.0
 - [x] [Review][Defer] W3: `FetchFailed` doesn't carry `#[source]` (AC5) — deferred, thiserror v2 reserves `source` field name
@@ -385,7 +385,8 @@ Claude Opus 4.6
 ### Change Log
 
 - 2026-04-05: Story 2.1 implemented — IDL Manager with on-chain fetch, bundled fallback, caching, validation, and hash computation
+- 2026-04-05: Code review complete — 10 patches applied (P1-P7, P9-P10, D2), 1 skipped (P8 used elsewhere), D1 deferred to 2.2, 5 deferred
 
 ## Status
 
-review
+done

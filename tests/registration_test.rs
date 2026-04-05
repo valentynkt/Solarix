@@ -56,19 +56,23 @@ async fn register_program_creates_db_rows() {
     cleanup(&pool, program_id).await;
 
     let idl_manager = IdlManager::new("http://localhost:8899".to_string());
-    let mut registry = ProgramRegistry::new(idl_manager, pool.clone());
+    let mut registry = ProgramRegistry::new(idl_manager);
 
-    let info = registry
-        .register_program(program_id, Some(&sample_idl_json()))
+    let idl_json = sample_idl_json();
+    let data = registry
+        .prepare_registration(program_id.to_string(), Some(idl_json.clone()))
+        .expect("prepare should succeed");
+
+    let info = ProgramRegistry::commit_registration(pool.clone(), data)
         .await
-        .expect("registration should succeed");
+        .expect("commit should succeed");
 
     assert_eq!(info.program_id, program_id);
     assert_eq!(info.program_name, "test_program");
     assert_eq!(info.idl_source, "manual");
-    assert_eq!(info.status, "registered");
+    assert_eq!(info.status, "schema_created");
     assert!(!info.idl_hash.is_empty());
-    assert!(!info.schema_name.is_empty());
+    assert_eq!(info.schema_name, "test_program_testprog");
 
     // Verify programs row
     let row = sqlx::query(r#"SELECT "program_name", "schema_name", "status", "idl_source" FROM "programs" WHERE "program_id" = $1"#)
@@ -81,7 +85,7 @@ async fn register_program_creates_db_rows() {
     let status: String = row.get("status");
     let source: String = row.get("idl_source");
     assert_eq!(name, "test_program");
-    assert_eq!(status, "registered");
+    assert_eq!(status, "schema_created");
     assert_eq!(source, "manual");
 
     // Verify indexer_state row
@@ -110,27 +114,31 @@ async fn register_duplicate_program_returns_error() {
     cleanup(&pool, program_id).await;
 
     let idl_manager = IdlManager::new("http://localhost:8899".to_string());
-    let mut registry = ProgramRegistry::new(idl_manager, pool.clone());
+    let mut registry = ProgramRegistry::new(idl_manager);
 
     // First registration succeeds
-    registry
-        .register_program(program_id, Some(&sample_idl_json()))
+    let idl_json = sample_idl_json();
+    let data = registry
+        .prepare_registration(program_id.to_string(), Some(idl_json.clone()))
+        .expect("first prepare should succeed");
+    ProgramRegistry::commit_registration(pool.clone(), data)
         .await
-        .expect("first registration should succeed");
+        .expect("first commit should succeed");
 
-    // Second registration returns AlreadyRegistered
-    let err = registry
-        .register_program(program_id, Some(&sample_idl_json()))
+    // Second registration — prepare succeeds (cache hit), commit fails
+    let data2 = registry
+        .prepare_registration(program_id.to_string(), Some(idl_json.clone()))
+        .expect("second prepare should succeed");
+    let err = ProgramRegistry::commit_registration(pool.clone(), data2)
         .await
-        .unwrap_err();
+        .expect_err("second commit should fail with AlreadyRegistered");
 
     match err {
         RegistrationError::AlreadyRegistered(id) => {
             assert_eq!(id, program_id);
         }
         other => {
-            eprintln!("expected AlreadyRegistered, got: {other}");
-            std::process::exit(1);
+            panic!("expected AlreadyRegistered, got: {other}");
         }
     }
 

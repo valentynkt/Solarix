@@ -55,16 +55,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("database ready");
 
     let idl_manager = IdlManager::new(config.rpc_url.clone());
-    let registry = ProgramRegistry::new(idl_manager, pool.clone());
+    let registry = ProgramRegistry::new(idl_manager);
     let registry = Arc::new(RwLock::new(registry));
+
+    let addr = format!("{}:{}", config.api_host, config.api_port);
+
     let state = Arc::new(solarix::api::AppState {
         pool,
         start_time,
         registry,
+        config,
     });
     let app = solarix::api::router(state);
-
-    let addr = format!("{}:{}", config.api_host, config.api_port);
     let listener = TcpListener::bind(&addr).await.map_err(|e| {
         error!(error = %e, addr = %addr, "failed to bind listener");
         e

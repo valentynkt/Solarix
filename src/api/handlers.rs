@@ -1,13 +1,39 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::Row;
 use tokio::time::timeout;
+use tracing::info;
 
-use super::AppState;
+use crate::registry::ProgramRegistry;
+
+use super::{ApiError, AppState};
+
+// ---------------------------------------------------------------------------
+// Request / query types
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct RegisterProgramRequest {
+    pub program_id: String,
+    pub idl: Option<Value>,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteProgramQuery {
+    #[serde(default)]
+    pub drop_tables: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
 
 pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let db_ok = timeout(
@@ -38,4 +64,332 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Val
             "version": version,
         })),
     )
+}
+
+#[axum::debug_handler]
+pub async fn register_program(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RegisterProgramRequest>,
+) -> Result<Response, ApiError> {
+    let registry = Arc::clone(&state.registry);
+    let pool = state.pool.clone();
+    do_register_program(registry, pool, body).await
+}
+
+async fn do_register_program(
+    registry: Arc<tokio::sync::RwLock<ProgramRegistry>>,
+    pool: sqlx::PgPool,
+    body: RegisterProgramRequest,
+) -> Result<Response, ApiError> {
+    let idl_json = body
+        .idl
+        .map(|v| serde_json::to_string(&v))
+        .transpose()
+        .map_err(|e| ApiError::InvalidRequest(format!("invalid IDL JSON: {e}")))?;
+
+    // Phase 1: Acquire write lock, prepare IDL + extract owned data, drop lock.
+    let data = {
+        let mut guard = registry.write().await;
+        let result = guard.prepare_registration(body.program_id, idl_json);
+        drop(guard);
+        result?
+    };
+
+    // Phase 2: DB + schema work without any lock held.
+    // commit_registration takes OWNED PgPool + RegistrationData so all sqlx
+    // references are scoped to its own state machine, keeping this future Send.
+    let was_cached = data.was_cached;
+    let program_id_for_rollback = data.program_id.clone();
+    let result = ProgramRegistry::commit_registration(pool, data).await;
+
+    // Phase 3: Rollback cache on failure if the IDL was freshly added.
+    if result.is_err() && !was_cached {
+        registry
+            .write()
+            .await
+            .rollback_cache(&program_id_for_rollback);
+    }
+
+    let program_info = result?;
+
+    info!(
+        program_id = %program_info.program_id,
+        idl_source = %program_info.idl_source,
+        "program registered via API"
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "data": {
+                "program_id": program_info.program_id,
+                "status": program_info.status,
+                "idl_source": program_info.idl_source,
+            },
+            "meta": {
+                "message": "Program registered. Indexing will begin shortly."
+            }
+        })),
+    )
+        .into_response())
+}
+
+pub async fn list_programs(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let rows = sqlx::query(
+        r#"SELECT "program_id", "program_name", "status", "created_at"
+           FROM "programs" ORDER BY "created_at" DESC"#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| ApiError::QueryFailed(e.to_string()))?;
+
+    let programs: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let program_id: String = row.get("program_id");
+            let program_name: String = row.get("program_name");
+            let status: String = row.get("status");
+            let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+            json!({
+                "program_id": program_id,
+                "program_name": program_name,
+                "status": status,
+                "created_at": created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    let total = programs.len();
+    Ok(Json(json!({
+        "data": programs,
+        "meta": { "total": total }
+    })))
+}
+
+pub async fn get_program(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let row = sqlx::query(
+        r#"SELECT p."program_id", p."program_name", p."schema_name",
+                p."idl_source", p."idl_hash", p."status",
+                p."created_at", p."updated_at",
+                i."total_instructions", i."total_accounts", i."last_processed_slot"
+           FROM "programs" p
+           LEFT JOIN "indexer_state" i ON p."program_id" = i."program_id"
+           WHERE p."program_id" = $1"#,
+    )
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| ApiError::QueryFailed(e.to_string()))?
+    .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
+
+    let program_id: String = row.get("program_id");
+    let program_name: String = row.get("program_name");
+    let schema_name: String = row.get("schema_name");
+    let idl_source: String = row.get("idl_source");
+    let idl_hash: String = row.get("idl_hash");
+    let status: String = row.get("status");
+    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+    let updated_at: Option<chrono::DateTime<chrono::Utc>> = row.get("updated_at");
+    let total_instructions: Option<i64> = row.get("total_instructions");
+    let total_accounts: Option<i64> = row.get("total_accounts");
+    let last_processed_slot: Option<i64> = row.get("last_processed_slot");
+
+    Ok(Json(json!({
+        "data": {
+            "program_id": program_id,
+            "program_name": program_name,
+            "schema_name": schema_name,
+            "idl_source": idl_source,
+            "idl_hash": idl_hash,
+            "status": status,
+            "created_at": created_at.to_rfc3339(),
+            "updated_at": updated_at.map(|t| t.to_rfc3339()),
+            "total_instructions": total_instructions.unwrap_or(0),
+            "total_accounts": total_accounts.unwrap_or(0),
+            "last_processed_slot": last_processed_slot,
+        }
+    })))
+}
+
+pub async fn delete_program(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<DeleteProgramQuery>,
+) -> Result<Json<Value>, ApiError> {
+    if query.drop_tables {
+        // Hard delete: drop schema, remove from DB and cache
+        let schema_name: String =
+            sqlx::query_scalar(r#"SELECT "schema_name" FROM "programs" WHERE "program_id" = $1"#)
+                .bind(&id)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(|e| ApiError::QueryFailed(e.to_string()))?
+                .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
+
+        let drop_ddl = format!(r#"DROP SCHEMA IF EXISTS "{schema_name}" CASCADE"#);
+        sqlx::raw_sql(&drop_ddl)
+            .execute(&state.pool)
+            .await
+            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        sqlx::query(r#"DELETE FROM "indexer_state" WHERE "program_id" = $1"#)
+            .bind(&id)
+            .execute(&state.pool)
+            .await
+            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        sqlx::query(r#"DELETE FROM "programs" WHERE "program_id" = $1"#)
+            .bind(&id)
+            .execute(&state.pool)
+            .await
+            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        let mut registry = state.registry.write().await;
+        registry.remove_program(&id);
+
+        info!(program_id = %id, "program hard-deleted (schema dropped)");
+
+        Ok(Json(json!({
+            "data": {
+                "program_id": id,
+                "action": "deleted",
+                "drop_tables": true,
+            }
+        })))
+    } else {
+        // Soft delete: set status to stopped
+        let result =
+            sqlx::query(r#"UPDATE "programs" SET "status" = 'stopped' WHERE "program_id" = $1"#)
+                .bind(&id)
+                .execute(&state.pool)
+                .await
+                .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(ApiError::ProgramNotFound(id));
+        }
+
+        info!(program_id = %id, "program soft-deleted (stopped)");
+
+        Ok(Json(json!({
+            "data": {
+                "program_id": id,
+                "action": "stopped",
+                "drop_tables": false,
+            }
+        })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::Response;
+    use http_body_util::BodyExt;
+
+    use super::*;
+    use crate::api::ApiError;
+
+    async fn response_json(response: Response<Body>) -> Value {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn register_request_deserializes_without_idl() {
+        let json = r#"{"program_id": "abc123"}"#;
+        let req: RegisterProgramRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.program_id, "abc123");
+        assert!(req.idl.is_none());
+    }
+
+    #[test]
+    fn register_request_deserializes_with_idl() {
+        let json = r#"{"program_id": "abc123", "idl": {"metadata": {"name": "test"}}}"#;
+        let req: RegisterProgramRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.program_id, "abc123");
+        assert!(req.idl.is_some());
+    }
+
+    #[tokio::test]
+    async fn api_error_program_not_found_returns_404() {
+        let err = ApiError::ProgramNotFound("abc123".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "PROGRAM_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn api_error_already_registered_returns_409() {
+        let err = ApiError::ProgramAlreadyRegistered("abc123".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "PROGRAM_ALREADY_REGISTERED");
+    }
+
+    #[tokio::test]
+    async fn api_error_invalid_filter_returns_400() {
+        let err = ApiError::InvalidFilter("bad filter".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "INVALID_FILTER");
+    }
+
+    #[tokio::test]
+    async fn api_error_invalid_request_returns_400() {
+        let err = ApiError::InvalidRequest("bad request".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn api_error_idl_error_returns_422() {
+        let err = ApiError::IdlError("parse failed".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "IDL_ERROR");
+    }
+
+    #[tokio::test]
+    async fn api_error_storage_error_returns_500_without_details() {
+        let err = ApiError::StorageError("secret db info".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "STORAGE_ERROR");
+        assert_eq!(body["error"]["message"], "Internal storage error");
+    }
+
+    #[tokio::test]
+    async fn api_error_query_failed_returns_500_without_details() {
+        let err = ApiError::QueryFailed("secret query info".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "QUERY_FAILED");
+        assert_eq!(body["error"]["message"], "Query execution failed");
+    }
+
+    #[test]
+    fn delete_query_defaults_drop_tables_to_false() {
+        let json = r#"{}"#;
+        let q: DeleteProgramQuery = serde_json::from_str(json).unwrap();
+        assert!(!q.drop_tables);
+    }
+
+    #[test]
+    fn delete_query_parses_drop_tables_true() {
+        let json = r#"{"drop_tables": true}"#;
+        let q: DeleteProgramQuery = serde_json::from_str(json).unwrap();
+        assert!(q.drop_tables);
+    }
 }

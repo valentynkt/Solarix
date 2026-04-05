@@ -104,6 +104,50 @@ so that I can index programs that don't have on-chain IDLs or use custom IDL mod
   - [x] `cargo fmt -- --check` passes
   - [x] `cargo test` passes all unit tests
 
+### Review Findings
+
+**Review ran 2026-04-06 using 3-layer adversarial review (Blind Hunter, Edge Case Hunter, Acceptance Auditor).**
+
+**Decisions resolved (user chose 1a, 2a — both grounded in architecture docs):**
+
+- [x] [Review][Decision->Patch] `sanitize_identifier` passes Unicode alphanumerics — **RESOLVED: option (a)** restrict to `is_ascii_alphanumeric()`. Grounded in research doc `agent-2a-idl-to-ddl-mapping.md` Section 7.7 which explicitly uses ASCII filter. **CODE APPLIED** in `src/storage/schema.rs`.
+- [x] [Review][Decision->Patch] `derive_schema_name` truncation drops the `_{id_prefix}` suffix — **RESOLVED: option (a)** cap name_part to 54 bytes. Grounded in architecture doc `core-architectural-decisions.md` lines 41-56: 8-char prefix is the collision safety mechanism. **CODE APPLIED** in `src/storage/schema.rs`.
+
+**Patches applied (code edited, awaiting build verification):**
+
+- [x] [Review][Patch] Non-atomic duplicate check + missing DB transaction — **APPLIED**: extracted `write_registration()` static method using `pool.begin()`/`tx.commit()`. [src/registry.rs]
+- [x] [Review][Patch] Dead `source` variable — **APPLIED**: removed dead assignment, removed unused `IdlSource` import. [src/registry.rs]
+- [x] [Review][Patch] `compute_idl_hash` not deterministic — **APPLIED**: added `canonicalize_json()` helper using `BTreeMap` for recursive key sorting. [src/idl/mod.rs]
+- [x] [Review][Patch] Cache populated even when DB fails — **APPLIED**: added `was_cached` tracking + `rollback_cache()` on error path. [src/registry.rs]
+- [x] [Review][Patch] `std::process::exit(1)` in test — **APPLIED**: replaced with `panic!()`. [tests/registration_test.rs]
+- [x] [Review][Patch] Integration test doesn't assert `schema_name` format — **APPLIED**: now asserts `test_program_testprog`. [tests/registration_test.rs]
+- [x] [Review][Patch] Test cleanup pattern — **ALREADY HANDLED**: cleanup-before-test pattern already in place.
+
+**Patch applied but requires further refactoring (user resolved during review):**
+
+- [x] [Review][Patch] `register_program` holds async write lock across `.await` — **RESOLVED by user refactoring**: split into `prepare_registration()` (sync, under lock) + `commit_registration()` (async, static, no lock needed). Also added `IdlFetchParams` + `fetch_idl_standalone()` + `insert_fetched_idl()` to `IdlManager` for lock-free async fetch. The handler uses `do_register_program()` helper for `Send` future proof.
+
+**Deferred:**
+
+- [x] [Review][Defer] No `program_id` format validation (empty string, non-base58) — deferred to Story 5.1 API boundary
+- [x] [Review][Defer] `indexer_state.last_processed_slot` defaults to NULL — verified safe, column is nullable
+
+**Dismissed (5 findings):** false positives or handled by design.
+
+### Review Status: BLOCKED
+
+**All patches are applied in code but build cannot be verified** due to a pre-existing compilation error in `src/api/handlers.rs` (axum `Handler` trait not satisfied for `register_program`). This is from story 5-1 API handler work happening in parallel on the same branch.
+
+**To resume:**
+
+1. Fix the axum handler compilation issue in `src/api/handlers.rs` (the `do_register_program` refactor is on the right track — needs the `Send` future issue resolved)
+2. Run `cargo build` to verify all patches compile
+3. Run `cargo test --lib` to verify unit tests (schema, IDL, registry modules)
+4. Run `cargo clippy` and `cargo fmt -- --check`
+5. If all pass, mark this story as `done`
+
+- [x] [Review][Defer] `indexer_state.last_processed_slot` defaults to NULL — verified safe; column is nullable, pipeline checkpoint reads handle NULL as "no progress"
+
 ## Dev Notes
 
 ### Current Codebase State (Post Story 2.1)

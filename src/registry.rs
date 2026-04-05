@@ -1,11 +1,12 @@
 // external crates
 use anchor_lang_idl_spec::Idl;
 use sqlx::PgPool;
-use tracing::info;
+use tracing::{error, info, warn};
 
 // internal crate
-use crate::idl::{IdlError, IdlManager, IdlSource};
-use crate::storage::schema::derive_schema_name;
+use crate::idl::{IdlError, IdlManager};
+use crate::storage::schema::{derive_schema_name, generate_schema, seed_metadata};
+use crate::storage::StorageError;
 
 /// Information about a registered program.
 #[derive(Debug, Clone)]
@@ -29,34 +30,233 @@ pub enum RegistrationError {
 
     #[error("database error: {0}")]
     DatabaseError(String),
+
+    #[error("schema generation failed: {0}")]
+    SchemaFailed(#[from] StorageError),
 }
 
-/// Registry of indexed programs, wrapping IdlManager and DB access.
+/// Owned data extracted during the prepare phase of registration.
+///
+/// Holding this struct lets the caller drop the `RwLock` write guard on
+/// `ProgramRegistry` before the expensive async commit phase, keeping the lock
+/// window minimal and the resulting future `Send`.
+#[derive(Debug, Clone)]
+pub struct RegistrationData {
+    pub program_id: String,
+    pub program_name: String,
+    pub schema_name: String,
+    pub idl_hash: String,
+    pub idl_source: String,
+    pub idl: Idl,
+    /// Whether the IDL was already in the cache before `prepare_registration`.
+    /// Used by `rollback_cache` to decide whether to remove the entry on failure.
+    pub was_cached: bool,
+}
+
+/// Registry of indexed programs, wrapping IdlManager for IDL cache access.
 pub struct ProgramRegistry {
     pub idl_manager: IdlManager,
-    pool: PgPool,
 }
 
 impl ProgramRegistry {
-    pub fn new(idl_manager: IdlManager, pool: PgPool) -> Self {
-        Self { idl_manager, pool }
+    pub fn new(idl_manager: IdlManager) -> Self {
+        Self { idl_manager }
     }
 
-    /// Register a program for indexing.
+    /// Phase 1: Resolve the IDL and prepare all data needed for registration.
     ///
-    /// If `idl_json` is `Some`, uses manual upload. Otherwise fetches via cascade.
-    /// Checks for duplicates, derives schema name, writes to `programs` and `indexer_state`.
-    pub async fn register_program(
+    /// This is a **sync** method so the caller never holds the `RwLock` write
+    /// guard across an `.await` point (which would make the handler future
+    /// `!Send`).
+    ///
+    /// If `idl_json` is `Some`, does a manual upload into the cache.
+    /// If `idl_json` is `None`, the IDL must already be cached (via a prior
+    /// call to `IdlManager::get_idl()` outside the lock).
+    ///
+    /// Returns owned `RegistrationData` so the caller can drop the lock
+    /// immediately and pass it to `commit_registration`.
+    pub fn prepare_registration(
         &mut self,
-        program_id: &str,
-        idl_json: Option<&str>,
+        program_id: String,
+        idl_json: Option<String>,
+    ) -> Result<RegistrationData, RegistrationError> {
+        let was_cached = self.idl_manager.get_cached(&program_id).is_some();
+
+        // Manual upload: parse + cache (sync)
+        if let Some(ref json) = idl_json {
+            self.idl_manager.upload_idl(&program_id, json)?;
+        } else if !was_cached {
+            // Caller must pre-fetch the IDL before acquiring the write lock.
+            // This should not happen if the handler logic is correct.
+            return Err(RegistrationError::Idl(IdlError::NotFound(
+                program_id.clone(),
+            )));
+        }
+
+        let cached = self
+            .idl_manager
+            .get_cached_entry(&program_id)
+            .ok_or_else(|| RegistrationError::Idl(IdlError::NotFound(program_id.clone())))?;
+
+        let idl_hash = cached.hash.clone();
+        let idl_source = cached.source.as_str().to_string();
+        let program_name = cached.idl.metadata.name.clone();
+        let schema_name = derive_schema_name(&program_name, &program_id);
+        let idl = cached.idl.clone();
+
+        Ok(RegistrationData {
+            program_id,
+            program_name,
+            schema_name,
+            idl_hash,
+            idl_source,
+            idl,
+            was_cached,
+        })
+    }
+
+    /// Phase 2: Commit registration to the database and generate the schema.
+    ///
+    /// This is a static method -- it does not require `&self` so the caller
+    /// can drop the write-lock on `ProgramRegistry` before calling it.
+    /// Phase 2: Commit registration to the database and generate the schema.
+    ///
+    /// IMPORTANT: No inline `sqlx::query().execute().await` in this function.
+    /// All DB work is delegated to separate named async fns. This is required
+    /// because Rust's async Send inference breaks when sqlx Executor references
+    /// appear inline in functions with multiple .await points (the "Executor
+    /// lifetime not general enough" issue). Leaf async fns with sqlx calls get
+    /// their own opaque future type, which the compiler CAN prove Send.
+    pub async fn commit_registration(
+        pool: PgPool,
+        data: RegistrationData,
     ) -> Result<ProgramInfo, RegistrationError> {
-        // Check for duplicate
+        Self::write_registration(
+            &pool,
+            &data.program_id,
+            &data.program_name,
+            &data.schema_name,
+            &data.idl_hash,
+            &data.idl_source,
+        )
+        .await?;
+
+        let status =
+            match generate_schema(pool.clone(), &data.idl, &data.program_id, &data.schema_name)
+                .await
+            {
+                Ok(()) => {
+                    if let Err(e) = seed_metadata(
+                        pool.clone(),
+                        &data.idl,
+                        &data.program_id,
+                        &data.idl_hash,
+                        &data.schema_name,
+                    )
+                    .await
+                    {
+                        warn!(
+                            program_id = %data.program_id,
+                            schema_name = %data.schema_name,
+                            error = %e,
+                            "metadata seeding failed (schema was created successfully)"
+                        );
+                    }
+
+                    Self::update_program_status(&pool, &data.program_id, "schema_created").await?;
+                    "schema_created".to_string()
+                }
+                Err(e) => {
+                    warn!(
+                        program_id = %data.program_id,
+                        schema_name = %data.schema_name,
+                        error = %e,
+                        "schema generation failed"
+                    );
+
+                    if let Err(update_err) =
+                        Self::update_program_status(&pool, &data.program_id, "error").await
+                    {
+                        error!(
+                            program_id = %data.program_id,
+                            error = %update_err,
+                            "failed to update program status to 'error'"
+                        );
+                    }
+
+                    return Err(RegistrationError::SchemaFailed(e));
+                }
+            };
+
+        info!(
+            program_id = %data.program_id,
+            program_name = %data.program_name,
+            schema_name = %data.schema_name,
+            idl_source = %data.idl_source,
+            status = %status,
+            "program registered with schema"
+        );
+
+        Ok(ProgramInfo {
+            program_id: data.program_id,
+            program_name: data.program_name,
+            schema_name: data.schema_name,
+            idl_hash: data.idl_hash,
+            idl_source: data.idl_source,
+            status,
+        })
+    }
+
+    /// Update a program's status in the DB.
+    ///
+    /// Isolated in its own named async fn to keep the caller's future Send.
+    async fn update_program_status(
+        pool: &PgPool,
+        program_id: &str,
+        status: &str,
+    ) -> Result<(), RegistrationError> {
+        sqlx::query(
+            r#"UPDATE "programs" SET "status" = $1, "updated_at" = NOW()
+               WHERE "program_id" = $2"#,
+        )
+        .bind(status)
+        .bind(program_id)
+        .execute(pool)
+        .await
+        .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Roll back IDL cache entry added during a failed registration.
+    ///
+    /// Call this only when `prepare_registration` succeeded but
+    /// `commit_registration` failed, and only when `data.was_cached` is `false`
+    /// (i.e., the IDL was freshly added by the prepare phase).
+    pub fn rollback_cache(&mut self, program_id: &str) {
+        self.idl_manager.remove_cached(program_id);
+    }
+
+    /// Execute registration DB writes in a single transaction.
+    ///
+    /// Checks for duplicate, inserts into `programs` and `indexer_state` atomically.
+    async fn write_registration(
+        pool: &PgPool,
+        program_id: &str,
+        program_name: &str,
+        schema_name: &str,
+        idl_hash: &str,
+        idl_source: &str,
+    ) -> Result<(), RegistrationError> {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
         let exists: bool = sqlx::query_scalar(
             r#"SELECT EXISTS(SELECT 1 FROM "programs" WHERE "program_id" = $1)"#,
         )
         .bind(program_id)
-        .fetch_one(&self.pool)
+        .fetch_one(tx.as_mut())
         .await
         .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
 
@@ -64,72 +264,38 @@ impl ProgramRegistry {
             return Err(RegistrationError::AlreadyRegistered(program_id.to_string()));
         }
 
-        // Get IDL (manual upload or fetch cascade)
-        let source = if idl_json.is_some() {
-            IdlSource::Manual
-        } else {
-            IdlSource::OnChain // will be determined by get_idl cascade
-        };
-
-        if let Some(json) = idl_json {
-            self.idl_manager.upload_idl(program_id, json)?;
-        } else {
-            self.idl_manager.get_idl(program_id).await?;
-        }
-
-        // Get cached entry for hash and actual source
-        let cached = self
-            .idl_manager
-            .get_cached_entry(program_id)
-            .ok_or_else(|| RegistrationError::Idl(IdlError::NotFound(program_id.to_string())))?;
-
-        let idl_hash = cached.hash.clone();
-        let actual_source = cached.source.as_str().to_string();
-        let program_name = cached.idl.metadata.name.clone();
-        let _ = source; // actual source comes from cached entry
-
-        let schema_name = derive_schema_name(&program_name, program_id);
-
-        // Insert into programs table
         sqlx::query(
             r#"INSERT INTO "programs" ("program_id", "program_name", "schema_name", "idl_hash", "idl_source", "status")
                VALUES ($1, $2, $3, $4, $5, 'registered')"#,
         )
         .bind(program_id)
-        .bind(&program_name)
-        .bind(&schema_name)
-        .bind(&idl_hash)
-        .bind(&actual_source)
-        .execute(&self.pool)
+        .bind(program_name)
+        .bind(schema_name)
+        .bind(idl_hash)
+        .bind(idl_source)
+        .execute(tx.as_mut())
         .await
         .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
 
-        // Insert into indexer_state table
         sqlx::query(
             r#"INSERT INTO "indexer_state" ("program_id", "status", "total_instructions", "total_accounts")
                VALUES ($1, 'initializing', 0, 0)"#,
         )
         .bind(program_id)
-        .execute(&self.pool)
+        .execute(tx.as_mut())
         .await
         .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
 
-        info!(
-            program_id,
-            program_name = %program_name,
-            schema_name = %schema_name,
-            idl_source = %actual_source,
-            "program registered"
-        );
+        tx.commit()
+            .await
+            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
 
-        Ok(ProgramInfo {
-            program_id: program_id.to_string(),
-            program_name,
-            schema_name,
-            idl_hash,
-            idl_source: actual_source,
-            status: "registered".to_string(),
-        })
+        Ok(())
+    }
+
+    /// Remove a program from the in-memory IDL cache.
+    pub fn remove_program(&mut self, program_id: &str) {
+        self.idl_manager.remove_cached(program_id);
     }
 
     /// Get a cached IDL for a program.
