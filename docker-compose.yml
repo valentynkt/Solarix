@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: solarix
+      POSTGRES_USER: solarix
+      POSTGRES_PASSWORD: solarix
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U solarix -d solarix"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  solarix:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://solarix:solarix@postgres:5432/solarix
+      SOLARIX_API_HOST: "0.0.0.0"
+      SOLARIX_API_PORT: "3000"
+      SOLARIX_LOG_FORMAT: "pretty"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

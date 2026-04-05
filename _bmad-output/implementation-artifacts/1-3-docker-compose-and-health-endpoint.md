@@ -1,6 +1,6 @@
 # Story 1.3: Docker Compose & Health Endpoint
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -44,35 +44,35 @@ so that I can confirm the project is runnable with zero manual setup.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Create `.dockerignore` (AC: #2)
-  - [ ] Exclude `target/`, `.git/`, `tests/`, `docs/`, `_bmad-output/`, `_bmad/`, `.claude/`, `.agents/`, `*.md` (except Cargo-relevant), `.env`
-- [ ] Task 2: Create `Dockerfile` (AC: #2)
-  - [ ] Build stage: `rust:latest`, copy `Cargo.toml`, `Cargo.lock`, `src/`, build release binary
-  - [ ] Runtime stage: `debian:bookworm-slim`, install `libssl3` and `ca-certificates` (needed by `native-tls`), copy binary from build stage
-  - [ ] Set `ENTRYPOINT` to the solarix binary
-- [ ] Task 3: Create `docker-compose.yml` (AC: #1)
-  - [ ] Define `postgres` service: `postgres:16`, health check, env vars for db/user/pass
-  - [ ] Define `solarix` service: build from `.`, depends_on postgres (condition: service_healthy), pass `DATABASE_URL` and other env vars
-  - [ ] Solarix health check: `curl -f http://localhost:3000/health` with interval/timeout/retries
-- [ ] Task 4: Implement health endpoint handler (AC: #3)
-  - [ ] Replace stub in `src/api/handlers.rs` with real handler that takes `State<AppState>`
-  - [ ] Check DB connectivity via `sqlx::query("SELECT 1").fetch_one(&pool)`
-  - [ ] Return JSON: `{ "status": "healthy"|"unhealthy", "database": "connected"|"disconnected", "uptime_seconds": N, "version": "0.1.0" }`
-  - [ ] Return HTTP 200 when healthy, 503 when unhealthy
-- [ ] Task 5: Create `AppState` and axum router (AC: #4)
-  - [ ] Define `AppState` struct in `src/api/mod.rs` with `pool: PgPool`, `start_time: std::time::Instant`
-  - [ ] Create `pub fn router(state: AppState) -> Router` that mounts `GET /health`
-- [ ] Task 6: Update `main.rs` to start axum server (AC: #4, #5)
-  - [ ] After DB bootstrap, create `AppState`, build router
-  - [ ] Bind `TcpListener` to `config.api_host:config.api_port`
-  - [ ] Use `axum::serve` with `with_graceful_shutdown` using `tokio::signal::ctrl_c()` or `SIGTERM`
-  - [ ] Log: "listening on {host}:{port}"
-- [ ] Task 7: Verify (AC: all)
-  - [ ] `cargo build` compiles
-  - [ ] `cargo clippy` passes
-  - [ ] `cargo fmt -- --check` passes
-  - [ ] `docker compose up --build` starts the full stack
-  - [ ] `curl http://localhost:3000/health` returns 200 with expected JSON
+- [x] Task 1: Create `.dockerignore` (AC: #2)
+  - [x] Exclude `target/`, `.git/`, `tests/`, `docs/`, `_bmad-output/`, `_bmad/`, `.claude/`, `.agents/`, `*.md` (except Cargo-relevant), `.env`
+- [x] Task 2: Create `Dockerfile` (AC: #2)
+  - [x] Build stage: `rust:latest`, copy `Cargo.toml`, `Cargo.lock`, `src/`, build release binary
+  - [x] Runtime stage: `debian:bookworm-slim`, install `libssl3` and `ca-certificates` (needed by `native-tls`), copy binary from build stage
+  - [x] Set `ENTRYPOINT` to the solarix binary
+- [x] Task 3: Create `docker-compose.yml` (AC: #1)
+  - [x] Define `postgres` service: `postgres:16`, health check, env vars for db/user/pass
+  - [x] Define `solarix` service: build from `.`, depends_on postgres (condition: service_healthy), pass `DATABASE_URL` and other env vars
+  - [x] Solarix health check: `curl -f http://localhost:3000/health` with interval/timeout/retries
+- [x] Task 4: Implement health endpoint handler (AC: #3)
+  - [x] Replace stub in `src/api/handlers.rs` with real handler that takes `State<AppState>`
+  - [x] Check DB connectivity via `sqlx::query("SELECT 1").fetch_one(&pool)`
+  - [x] Return JSON: `{ "status": "healthy"|"unhealthy", "database": "connected"|"disconnected", "uptime_seconds": N, "version": "0.1.0" }`
+  - [x] Return HTTP 200 when healthy, 503 when unhealthy
+- [x] Task 5: Create `AppState` and axum router (AC: #4)
+  - [x] Define `AppState` struct in `src/api/mod.rs` with `pool: PgPool`, `start_time: std::time::Instant`
+  - [x] Create `pub fn router(state: AppState) -> Router` that mounts `GET /health`
+- [x] Task 6: Update `main.rs` to start axum server (AC: #4, #5)
+  - [x] After DB bootstrap, create `AppState`, build router
+  - [x] Bind `TcpListener` to `config.api_host:config.api_port`
+  - [x] Use `axum::serve` with `with_graceful_shutdown` using `tokio::signal::ctrl_c()` or `SIGTERM`
+  - [x] Log: "listening on {host}:{port}"
+- [x] Task 7: Verify (AC: all)
+  - [x] `cargo build` compiles
+  - [x] `cargo clippy` passes
+  - [x] `cargo fmt -- --check` passes
+  - [x] `docker compose up --build` starts the full stack
+  - [x] `curl http://localhost:3000/health` returns 200 with expected JSON
 
 ## Dev Notes
 
@@ -453,10 +453,27 @@ All file paths match the architecture document. New files (`Dockerfile`, `docker
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- All 7 tasks completed successfully
+- Docker compose stack verified: `docker compose up --build` starts PostgreSQL 16 + Solarix, health endpoint returns 200 with `{"status":"healthy","database":"connected","uptime_seconds":N,"version":"0.1.0"}`
+- Graceful shutdown via SIGINT/SIGTERM implemented using `tokio::select!` with `#[cfg(unix)]` guard
+- `AppState` uses `Arc<AppState>` pattern with `PgPool` + `Instant` for uptime tracking
+- All lint checks pass: `cargo build`, `cargo clippy`, `cargo fmt --check`
+
+### Change Log
+
+- 2026-04-05: Implemented Story 1.3 — Docker Compose & Health Endpoint
+
 ### File List
+
+- `.dockerignore` (created)
+- `Dockerfile` (created)
+- `docker-compose.yml` (created)
+- `src/api/mod.rs` (modified — added AppState, router())
+- `src/api/handlers.rs` (modified — replaced stub with real health handler)
+- `src/main.rs` (modified — added axum server startup + graceful shutdown)

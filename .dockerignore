@@ -1,0 +1,13 @@
+target/
+.git/
+tests/
+docs/
+_bmad-output/
+_bmad/
+.claude/
+.agents/
+.env
+.env.*
+!.env.example
+*.md
+!README.md
