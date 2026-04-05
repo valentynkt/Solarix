@@ -1,6 +1,6 @@
 # Story 1.1: Project Scaffolding & Configuration
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -46,42 +46,42 @@ so that all subsequent development starts from a solid, consistent foundation.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Initialize project (AC: #1)
-  - [ ] Run `cargo init --name solarix` in project root
-  - [ ] Create `.gitignore` with Rust defaults + `.env` (do NOT ignore `Cargo.lock` — must be committed for binary crates)
-  - [ ] Create `rustfmt.toml` with `edition = "2021"`, `max_width = 100`
-  - [ ] Create `clippy.toml` with `allow-expect-in-tests = true`
-- [ ] Task 2: Configure Cargo.toml (AC: #1)
-  - [ ] Add all production dependencies per [Dependencies](#dependencies-cargotml)
-  - [ ] Add dev-dependencies: `proptest`, `axum-test`, `tokio` (test-util feature)
-  - [ ] Add `[lints]` section per [Lints](#lints-cargotml)
-- [ ] Task 3: Create Config struct (AC: #3)
-  - [ ] Create `src/config.rs` with `Config` struct deriving `clap::Parser`
-  - [ ] Add all 22 env var fields per [Config Fields](#config-fields-22-env-vars)
-  - [ ] Create `.env.example` documenting all 22 variables per [.env.example Content](#env-example-content)
-- [ ] Task 4: Create shared types (AC: #4)
-  - [ ] Create `src/types.rs` with `DecodedInstruction`, `DecodedAccount`, `BlockData`, `TransactionData` placeholder structs (each must derive `Debug, Clone, Serialize, Deserialize`)
-- [ ] Task 5: Create module stubs (AC: #4)
-  - [ ] Create `src/idl/mod.rs` with `IdlManager` stub struct + `IdlError` enum
-  - [ ] Create `src/idl/fetch.rs` with placeholder fetch function
-  - [ ] Create `src/decoder/mod.rs` with `SolarixDecoder` trait + `DecodeError` enum
-  - [ ] Create `src/pipeline/mod.rs` with `PipelineOrchestrator` stub + `PipelineError` enum
-  - [ ] Create `src/pipeline/rpc.rs` with `BlockSource` + `AccountSource` trait stubs
-  - [ ] Create `src/pipeline/ws.rs` with `TransactionStream` trait stub
-  - [ ] Create `src/storage/mod.rs` with pool init placeholder + `StorageError` enum
-  - [ ] Create `src/storage/schema.rs` with DDL generator placeholder
-  - [ ] Create `src/storage/writer.rs` with writer placeholder
-  - [ ] Create `src/storage/queries.rs` with query builder placeholder
-  - [ ] Create `src/api/mod.rs` with router placeholder + `ApiError` enum
-  - [ ] Create `src/api/handlers.rs` with handler stubs
-  - [ ] Create `src/api/filters.rs` with filter parsing placeholder
-- [ ] Task 6: Create lib.rs and main.rs (AC: #4, #5)
-  - [ ] Create `src/lib.rs` with `pub mod` declarations for all modules
-  - [ ] Create `src/main.rs` with clap parse, tracing init, tokio::main
-- [ ] Task 7: Verify (AC: #1, #2)
-  - [ ] Run `cargo build` -- must compile
-  - [ ] Run `cargo clippy` -- zero warnings
-  - [ ] Run `cargo fmt -- --check` -- passes
+- [x] Task 1: Initialize project (AC: #1)
+  - [x] Run `cargo init --name solarix` in project root
+  - [x] Create `.gitignore` with Rust defaults + `.env` (do NOT ignore `Cargo.lock` — must be committed for binary crates)
+  - [x] Create `rustfmt.toml` with `edition = "2021"`, `max_width = 100`
+  - [x] Create `clippy.toml` with `allow-expect-in-tests = true`
+- [x] Task 2: Configure Cargo.toml (AC: #1)
+  - [x] Add all production dependencies per [Dependencies](#dependencies-cargotml)
+  - [x] Add dev-dependencies: `proptest`, `axum-test`, `tokio` (test-util feature)
+  - [x] Add `[lints]` section per [Lints](#lints-cargotml)
+- [x] Task 3: Create Config struct (AC: #3)
+  - [x] Create `src/config.rs` with `Config` struct deriving `clap::Parser`
+  - [x] Add all 22 env var fields per [Config Fields](#config-fields-22-env-vars)
+  - [x] Create `.env.example` documenting all 22 variables per [.env.example Content](#env-example-content)
+- [x] Task 4: Create shared types (AC: #4)
+  - [x] Create `src/types.rs` with `DecodedInstruction`, `DecodedAccount`, `BlockData`, `TransactionData` placeholder structs (each must derive `Debug, Clone, Serialize, Deserialize`)
+- [x] Task 5: Create module stubs (AC: #4)
+  - [x] Create `src/idl/mod.rs` with `IdlManager` stub struct + `IdlError` enum
+  - [x] Create `src/idl/fetch.rs` with placeholder fetch function
+  - [x] Create `src/decoder/mod.rs` with `SolarixDecoder` trait + `DecodeError` enum
+  - [x] Create `src/pipeline/mod.rs` with `PipelineOrchestrator` stub + `PipelineError` enum
+  - [x] Create `src/pipeline/rpc.rs` with `BlockSource` + `AccountSource` trait stubs
+  - [x] Create `src/pipeline/ws.rs` with `TransactionStream` trait stub
+  - [x] Create `src/storage/mod.rs` with pool init placeholder + `StorageError` enum
+  - [x] Create `src/storage/schema.rs` with DDL generator placeholder
+  - [x] Create `src/storage/writer.rs` with writer placeholder
+  - [x] Create `src/storage/queries.rs` with query builder placeholder
+  - [x] Create `src/api/mod.rs` with router placeholder + `ApiError` enum
+  - [x] Create `src/api/handlers.rs` with handler stubs
+  - [x] Create `src/api/filters.rs` with filter parsing placeholder
+- [x] Task 6: Create lib.rs and main.rs (AC: #4, #5)
+  - [x] Create `src/lib.rs` with `pub mod` declarations for all modules
+  - [x] Create `src/main.rs` with clap parse, tracing init, tokio::main
+- [x] Task 7: Verify (AC: #1, #2)
+  - [x] Run `cargo build` -- must compile
+  - [x] Run `cargo clippy` -- zero warnings
+  - [x] Run `cargo fmt -- --check` -- passes
 
 ## Dev Notes
 
@@ -427,12 +427,83 @@ All file paths match the architecture document exactly. 14 source files in `src/
 - [Source: _bmad-output/planning-artifacts/architecture/starter-template-evaluation.md#Initialization Command]
 - [Source: _bmad-output/planning-artifacts/epics/epic-1-project-foundation-first-boot.md#Story 1.1]
 
+### Review Findings
+
+#### Decision Needed
+
+- [ ] [Review][Decision] **Solana crate versions: v2 vs v3** — Commented-out Solana crates (`solana-rpc-client-api`, `solana-pubsub-client`) are pinned to `"2"` but CLAUDE.md states "All Solana crates target v3.x ecosystem." Should these be updated to `"3"` now, or left as-is until uncommented in Epic 2/3? [Cargo.toml:39-40]
+- [ ] [Review][Decision] **RPITIT traits not object-safe** — `BlockSource`, `AccountSource`, and `TransactionStream` use `-> impl Future` (RPITIT) which prevents `dyn Trait` usage. Architecture spec describes these as "seams for testing" implying trait object support. Should these be converted to `#[async_trait]` or boxed futures now, or deferred to their implementation stories? [src/pipeline/rpc.rs, src/pipeline/ws.rs]
+
+#### Patch
+
+- [ ] [Review][Patch] **`init_pool` returns `()` instead of pool handle** — `storage::init_pool` returns `Result<(), StorageError>`. This is structurally unusable — callers need the `PgPool`. Should return `Result<(), StorageError>` as a stub that documents it will become `Result<sqlx::PgPool, StorageError>`, or change the signature now. [src/storage/mod.rs:22]
+- [ ] [Review][Patch] **`log_format` case-sensitive with no validation** — `config.log_format == "json"` is exact match. `"JSON"`, `"Pretty"`, or typos like `"jsn"` silently fall through to pretty format. Fix: lowercase the comparison or use an enum. [src/main.rs:16]
+- [ ] [Review][Patch] **`channel_capacity = 0` causes tokio panic** — `tokio::sync::mpsc::channel(0)` panics. The config field accepts 0 as valid `usize`. Fix: change default or add `value_parser = clap::value_parser!(usize).range(1..)`. [src/config.rs:64]
+- [ ] [Review][Patch] **`QueryBuilder` name collides with `sqlx::QueryBuilder`** — The local `QueryBuilder` struct in `storage/queries.rs` shadows the sqlx type that the architecture spec explicitly uses. Rename to `DynamicQueryBuilder` or `SolarixQueryBuilder`. [src/storage/queries.rs:2]
+
+#### Deferred
+
+- [x] [Review][Defer] **Config cross-field validation missing** — `db_pool_min > db_pool_max`, `start_slot > end_slot`, `retry_initial_ms > retry_max_ms`, `api_default_page_size > api_max_page_size`, `rpc_rps = 0`, `backfill_chunk_size = 0` — all accepted without validation. Deferred: validation belongs in the story that first uses each field.
+- [x] [Review][Defer] **`TransactionData.slot` duplicates `BlockData.slot`** — Redundancy invites inconsistency. Deferred: types will evolve when the pipeline is implemented (Story 3.4+).
+- [x] [Review][Defer] **`ApiError` missing `IntoResponse` impl** — Architecture spec requires it. Acceptable stub gap; belongs in Story 5.1 (API endpoints).
+- [x] [Review][Defer] **`subscribe()` returns `()` with no message channel** — The trait signature provides no way to receive messages. Deferred: will be redesigned in Story 4.1 (WebSocket streaming).
+- [x] [Review][Defer] **`fetch_block` on empty/skipped slot** — Returns `BlockData` not `Option<BlockData>`. Solana produces empty slots returning `null`. Deferred: Story 3.3 (RPC block source).
+- [x] [Review][Defer] **`get_program_account_keys` unbounded `Vec<String>`** — Large programs could OOM. Deferred: Story 3.3 (RPC client).
+- [x] [Review][Defer] **`log_level` and `tx_encoding` are free-form strings** — Invalid values not rejected at startup. Deferred: can add enums when the fields are first consumed.
+- [x] [Review][Defer] **`litesvm` absent from dev-dependencies** — Architecture spec lists it for pipeline integration tests. Deferred: add in Epic 3 when pipeline tests are written.
+- [x] [Review][Defer] **`chainparser` git dep unpinned** — Uses branch tip, not tag/rev. Deferred: will be addressed when uncommented in Epic 2.
+
 ## Dev Agent Record
 
 ### Agent Model Used
 
+Claude Opus 4.6
+
 ### Debug Log References
+
+- `cargo build` — 192 crates compiled, zero errors
+- `cargo clippy` — zero warnings
+- `cargo fmt -- --check` — passes clean
 
 ### Completion Notes List
 
+- Initialized Rust binary crate with `cargo init --name solarix`
+- Configured Cargo.toml with all 13 production deps (Solana crates commented out per AC1), 3 dev deps, and strict lints (unsafe_code forbid, unwrap/expect/panic deny)
+- Created Config struct with all 22 env var fields matching architecture spec exactly
+- Created .env.example with all 22 variables documented
+- Created 4 shared types in types.rs (DecodedInstruction, DecodedAccount, BlockData, TransactionData)
+- Created 13 module stub files across 5 modules (idl, decoder, pipeline, storage, api) with error enums, trait definitions, and placeholder structs
+- PipelineError includes From conversions for DecodeError and StorageError
+- Created lib.rs with pub mod declarations for all 7 modules
+- Created main.rs with clap parse, dotenvy, tracing subscriber init (json/pretty), and tokio::main async entry point
+- All code compiles cleanly under strict clippy lints with zero warnings
+
+### Change Log
+
+- 2026-04-05: Initial project scaffolding — all 23 files created, builds clean
+
 ### File List
+
+- Cargo.toml (new)
+- Cargo.lock (new)
+- .gitignore (new)
+- rustfmt.toml (new)
+- clippy.toml (new)
+- .env.example (new)
+- src/main.rs (new)
+- src/lib.rs (new)
+- src/config.rs (new)
+- src/types.rs (new)
+- src/idl/mod.rs (new)
+- src/idl/fetch.rs (new)
+- src/decoder/mod.rs (new)
+- src/pipeline/mod.rs (new)
+- src/pipeline/rpc.rs (new)
+- src/pipeline/ws.rs (new)
+- src/storage/mod.rs (new)
+- src/storage/schema.rs (new)
+- src/storage/writer.rs (new)
+- src/storage/queries.rs (new)
+- src/api/mod.rs (new)
+- src/api/handlers.rs (new)
+- src/api/filters.rs (new)

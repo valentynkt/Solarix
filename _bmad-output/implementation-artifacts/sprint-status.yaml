@@ -67,8 +67,8 @@ development_status:
   # ============================================================================
 
   epic-1: in-progress
-  1-1-project-scaffolding-and-configuration: ready-for-dev # Track A | deps: none
-  1-2-database-connection-and-system-table-bootstrap: ready-for-dev # Track A | deps: 1.1
+  1-1-project-scaffolding-and-configuration: review # Track A | deps: none
+  1-2-database-connection-and-system-table-bootstrap: review # Track A | deps: 1.1
   1-3-docker-compose-and-health-endpoint: backlog # Track A | deps: 1.1, 1.2
   epic-1-retrospective: optional
 

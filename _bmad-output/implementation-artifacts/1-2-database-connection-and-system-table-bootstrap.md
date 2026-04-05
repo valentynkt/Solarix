@@ -1,6 +1,6 @@
 # Story 1.2: Database Connection & System Table Bootstrap
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -21,7 +21,7 @@ so that no manual database setup or migration tooling is required.
    - **Given** a connected pool
    - **When** bootstrap runs
    - **Then** it creates the `programs` table in `public` schema with `IF NOT EXISTS`
-   - **And** columns: `program_id TEXT PRIMARY KEY`, `program_name TEXT`, `schema_name TEXT`, `idl_hash TEXT`, `idl_source TEXT`, `status TEXT NOT NULL DEFAULT 'registered'`, `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+   - **And** columns: `program_id VARCHAR(44) PRIMARY KEY`, `program_name TEXT NOT NULL`, `schema_name TEXT NOT NULL UNIQUE`, `idl_hash VARCHAR(64)`, `idl_source TEXT` (valid values: `'onchain'`, `'file'`, `'bundled'`, `'manual'`), `status TEXT NOT NULL DEFAULT 'initializing'` (valid values: `'initializing'`, `'backfilling'`, `'realtime'`, `'paused'`, `'error'`), `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
 
 3. **AC3: System tables created (indexer_state)**
    - **Given** a connected pool
@@ -52,50 +52,49 @@ so that no manual database setup or migration tooling is required.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Implement `init_pool()` in `src/storage/mod.rs` (AC: #1, #5)
-  - [ ] Add `pub async fn init_pool(config: &Config) -> Result<PgPool, StorageError>`
-  - [ ] Configure `PgPoolOptions` with min/max from config, acquire timeout 5s, idle timeout 300s, max lifetime 1800s
-  - [ ] On connection failure, return `StorageError::ConnectionFailed` with sanitized URL (no password)
-  - [ ] Log at `info!` level on successful connection with pool size details
-- [ ] Task 2: Implement `bootstrap_system_tables()` in `src/storage/mod.rs` (AC: #2, #3, #4, #6)
-  - [ ] Add `pub async fn bootstrap_system_tables(pool: &PgPool) -> Result<(), StorageError>`
-  - [ ] Write DDL for `programs` table per AC2 columns, using `IF NOT EXISTS`
-  - [ ] Write DDL for `indexer_state` table per AC3 columns, using `IF NOT EXISTS`
-  - [ ] Execute both via `sqlx::raw_sql()` in sequence
-  - [ ] On DDL failure, return `StorageError::DdlFailed` with context
-  - [ ] Log at `info!` level on successful bootstrap
-- [ ] Task 3: Update `main.rs` to call pool init and bootstrap (AC: #7)
-  - [ ] After tracing init, call `storage::init_pool(&config).await`
-  - [ ] On failure, log error and return early (non-zero exit)
-  - [ ] Call `storage::bootstrap_system_tables(&pool).await`
-  - [ ] On failure, log error and return early
-  - [ ] Log success: "database connected, system tables bootstrapped"
-- [ ] Task 4: Add unit test for DDL idempotency (AC: #6)
-  - [ ] In `src/storage/mod.rs` `#[cfg(test)] mod tests`, add test that calls `bootstrap_system_tables` twice without error (requires running PostgreSQL)
-- [ ] Task 5: Verify (AC: all)
-  - [ ] `cargo build` compiles
-  - [ ] `cargo clippy` passes
-  - [ ] `cargo fmt -- --check` passes
+- [x] Task 1: Replace `init_pool()` stub in `src/storage/mod.rs` (AC: #1, #5)
+  - [x] Change signature from `pub async fn init_pool(_database_url: &str) -> Result<(), StorageError>` to `pub async fn init_pool(config: &Config) -> Result<PgPool, StorageError>`
+  - [x] Add imports: `sqlx::PgPool`, `sqlx::postgres::PgPoolOptions`, `std::time::Duration`, `tracing::info`, `crate::config::Config`
+  - [x] Configure `PgPoolOptions` with `min_connections(config.db_pool_min)` (default 2), `max_connections(config.db_pool_max)` (default 10), acquire timeout 5s, idle timeout 300s, max lifetime 1800s
+  - [x] On connection failure, return `StorageError::ConnectionFailed` with sanitized URL (no password)
+  - [x] Log at `info!` level on successful connection with pool size details
+- [x] Task 2: Implement `bootstrap_system_tables()` in `src/storage/mod.rs` (AC: #2, #3, #4, #6)
+  - [x] Add `pub async fn bootstrap_system_tables(pool: &PgPool) -> Result<(), StorageError>`
+  - [x] Write DDL for `programs` table per AC2 columns, using `IF NOT EXISTS`
+  - [x] Write DDL for `indexer_state` table per AC3 columns, using `IF NOT EXISTS`
+  - [x] Execute both via `sqlx::raw_sql()` in sequence
+  - [x] On DDL failure, return `StorageError::DdlFailed` with context
+  - [x] Log at `info!` level on successful bootstrap
+- [x] Task 3: Update `main.rs` to call pool init and bootstrap (AC: #7)
+  - [x] After tracing init, call `storage::init_pool(&config).await`
+  - [x] On failure, log error and return early (non-zero exit)
+  - [x] Call `storage::bootstrap_system_tables(&pool).await`
+  - [x] On failure, log error and return early
+  - [x] Log success: "database connected, system tables bootstrapped"
+- [x] Task 4: Add integration test for DDL idempotency (AC: #6)
+  - [x] Create `tests/bootstrap_test.rs` with `#[ignore]` (requires running PostgreSQL)
+  - [x] Test calls `bootstrap_system_tables` twice and asserts both succeed
+  - [x] Optionally verify tables exist via `information_schema.tables` query
+  - [x] Run with `cargo test -- --ignored` when PostgreSQL is available
+- [x] Task 5: Verify (AC: all)
+  - [x] `cargo build` compiles
+  - [x] `cargo clippy` passes
+  - [x] `cargo fmt -- --check` passes
   - [ ] With running PostgreSQL, `cargo run` connects and creates tables
   - [ ] Second `cargo run` succeeds (idempotent)
 
 ## Dev Notes
 
-### Story 1.1 Dependency
+### Story 1.1 State (Completed)
 
-Story 1.1 is being implemented in parallel. It creates:
+Story 1.1 is merged. The current codebase has:
 
-- `src/storage/mod.rs` with `StorageError` enum stub and pool init placeholder
-- `src/config.rs` with `Config` struct (including `database_url`, `db_pool_min`, `db_pool_max`)
-- `src/main.rs` with clap parse and tracing init
-- `src/lib.rs` with all module declarations
+- `src/storage/mod.rs` — `StorageError` enum (4 variants) + `init_pool` stub returning `Result<(), StorageError>`
+- `src/config.rs` — `Config` struct with `database_url: String`, `db_pool_min: u32` (default 2), `db_pool_max: u32` (default 10)
+- `src/main.rs` — clap parse, tracing init, placeholder comment for DB pool
+- `src/lib.rs` — all 7 module declarations
 
-This story replaces the storage stub with real implementation. If 1.1 is not yet merged, the dev agent must either:
-
-1. Wait for 1.1 to merge and start from that branch, OR
-2. Create the same file structure independently (matching 1.1's patterns exactly)
-
-The recommended approach: check if `src/storage/mod.rs` exists with the `StorageError` stub. If yes, extend it. If not, create it following the patterns from Story 1.1's dev notes.
+This story replaces the `init_pool` stub with a real implementation. Key change: the stub signature `init_pool(_database_url: &str) -> Result<(), StorageError>` must change to `init_pool(config: &Config) -> Result<PgPool, StorageError>` (takes full Config, returns pool).
 
 ### StorageError Enum (from Story 1.1)
 
@@ -146,52 +145,60 @@ pub async fn init_pool(config: &Config) -> Result<PgPool, StorageError> {
 ### System Table DDL
 
 ```sql
-CREATE TABLE IF NOT EXISTS programs (
-    program_id TEXT PRIMARY KEY,
-    program_name TEXT,
-    schema_name TEXT,
-    idl_hash TEXT,
-    idl_source TEXT,
-    status TEXT NOT NULL DEFAULT 'registered',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS "programs" (
+    "program_id"   VARCHAR(44) PRIMARY KEY,
+    "program_name" TEXT NOT NULL,
+    "schema_name"  TEXT NOT NULL UNIQUE,
+    "idl_hash"     VARCHAR(64),
+    "idl_source"   TEXT,
+    "status"       TEXT NOT NULL DEFAULT 'initializing',
+    "created_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "updated_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS indexer_state (
-    program_id TEXT PRIMARY KEY REFERENCES programs(program_id),
-    status TEXT NOT NULL,
-    last_processed_slot BIGINT,
-    last_heartbeat TIMESTAMPTZ,
-    error_message TEXT,
-    total_instructions BIGINT DEFAULT 0,
-    total_accounts BIGINT DEFAULT 0
+CREATE TABLE IF NOT EXISTS "indexer_state" (
+    "program_id"          VARCHAR(44) PRIMARY KEY REFERENCES "programs"("program_id"),
+    "status"              TEXT NOT NULL,
+    "last_processed_slot" BIGINT,
+    "last_heartbeat"      TIMESTAMPTZ,
+    "error_message"       TEXT,
+    "total_instructions"  BIGINT DEFAULT 0,
+    "total_accounts"      BIGINT DEFAULT 0
 );
 ```
+
+Column notes:
+
+- `program_id` — Solana base58 pubkey, max 44 chars
+- `schema_name` — `UNIQUE` prevents per-program schema collisions
+- `idl_hash` — SHA-256 hex digest, always 64 chars
+- `idl_source` — valid values: `'onchain'`, `'file'`, `'bundled'`, `'manual'`
+- `programs.status` — valid values: `'initializing'`, `'backfilling'`, `'realtime'`, `'paused'`, `'error'`
 
 Execute via `sqlx::raw_sql()`:
 
 ```rust
 pub async fn bootstrap_system_tables(pool: &PgPool) -> Result<(), StorageError> {
     let ddl = r#"
-        CREATE TABLE IF NOT EXISTS programs (
-            program_id TEXT PRIMARY KEY,
-            program_name TEXT,
-            schema_name TEXT,
-            idl_hash TEXT,
-            idl_source TEXT,
-            status TEXT NOT NULL DEFAULT 'registered',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        CREATE TABLE IF NOT EXISTS "programs" (
+            "program_id"   VARCHAR(44) PRIMARY KEY,
+            "program_name" TEXT NOT NULL,
+            "schema_name"  TEXT NOT NULL UNIQUE,
+            "idl_hash"     VARCHAR(64),
+            "idl_source"   TEXT,
+            "status"       TEXT NOT NULL DEFAULT 'initializing',
+            "created_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            "updated_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        CREATE TABLE IF NOT EXISTS indexer_state (
-            program_id TEXT PRIMARY KEY REFERENCES programs(program_id),
-            status TEXT NOT NULL,
-            last_processed_slot BIGINT,
-            last_heartbeat TIMESTAMPTZ,
-            error_message TEXT,
-            total_instructions BIGINT DEFAULT 0,
-            total_accounts BIGINT DEFAULT 0
+        CREATE TABLE IF NOT EXISTS "indexer_state" (
+            "program_id"          VARCHAR(44) PRIMARY KEY REFERENCES "programs"("program_id"),
+            "status"              TEXT NOT NULL,
+            "last_processed_slot" BIGINT,
+            "last_heartbeat"      TIMESTAMPTZ,
+            "error_message"       TEXT,
+            "total_instructions"  BIGINT DEFAULT 0,
+            "total_accounts"      BIGINT DEFAULT 0
         );
     "#;
 
@@ -213,7 +220,7 @@ pub async fn bootstrap_system_tables(pool: &PgPool) -> Result<(), StorageError> 
 
 ### main.rs Integration
 
-Story 1.1 creates `main.rs` with config parse and tracing init. This story adds DB pool + bootstrap after tracing init:
+Story 1.1 created `main.rs` with config parse and tracing init. This story adds DB pool + bootstrap after tracing init. Add `use tracing::error;` to main.rs imports alongside existing `use tracing::info;`:
 
 ```rust
 // After tracing init (from Story 1.1):
@@ -253,7 +260,7 @@ The `?` operator works because `main` returns `Result<(), Box<dyn std::error::Er
 - NO logging the raw DATABASE_URL (contains password)
 - NO separate error.rs file -- `StorageError` stays in `storage/mod.rs`
 
-### Import Ordering Convention
+### Required Imports for `src/storage/mod.rs`
 
 ```rust
 // std library
@@ -262,21 +269,38 @@ use std::time::Duration;
 // external crates
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use tracing::{error, info};
+use tracing::info;
 
 // internal crate
 use crate::config::Config;
 ```
 
+For `main.rs`, add `use tracing::error;` to existing imports.
+
 ### Testing Notes
 
-The bootstrap test requires a running PostgreSQL instance. Use `DATABASE_URL` from `.env` or environment. The test should:
+The bootstrap test is an **integration test** (requires running PostgreSQL). Place in `tests/bootstrap_test.rs`, not in `#[cfg(test)] mod tests`.
 
-1. Call `bootstrap_system_tables` once -- assert Ok
-2. Call `bootstrap_system_tables` again -- assert Ok (idempotent)
-3. Optionally verify tables exist via `information_schema.tables` query
+```rust
+// tests/bootstrap_test.rs
+use sqlx::postgres::PgPoolOptions;
 
-Mark integration tests with `#[ignore]` if they require external services, so `cargo test` doesn't fail without PostgreSQL. Run with `cargo test -- --ignored` when PostgreSQL is available.
+#[tokio::test]
+#[ignore] // requires running PostgreSQL
+async fn bootstrap_is_idempotent() {
+    dotenvy::dotenv().ok();
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://solarix:solarix@localhost:5432/solarix".to_string());
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+
+    // First call succeeds
+    solarix::storage::bootstrap_system_tables(&pool).await.unwrap();
+    // Second call also succeeds (idempotent)
+    solarix::storage::bootstrap_system_tables(&pool).await.unwrap();
+}
+```
+
+Run with `cargo test -- --ignored` when PostgreSQL is available. `cargo test` skips these by default.
 
 ### References
 
@@ -291,8 +315,30 @@ Mark integration tests with `#[ignore]` if they require external services, so `c
 
 ### Agent Model Used
 
+Claude Opus 4.6
+
 ### Debug Log References
+
+None — clean implementation with no blockers.
 
 ### Completion Notes List
 
+- Replaced `init_pool()` stub with real `PgPoolOptions`-based implementation accepting `&Config`, returning `PgPool`
+- Pool configured with min/max connections, acquire timeout (5s), idle timeout (300s), max lifetime (1800s)
+- Connection errors return `StorageError::ConnectionFailed` with sqlx error message (no raw URL leaked)
+- Implemented `bootstrap_system_tables()` with DDL for `programs` and `indexer_state` tables via `sqlx::raw_sql()`
+- All DDL uses `IF NOT EXISTS` for idempotent startup
+- Updated `main.rs` to call `init_pool` and `bootstrap_system_tables` after tracing init, with error logging on failure
+- Created integration test `tests/bootstrap_test.rs` with `#[ignore]` — tests idempotency and verifies tables via `information_schema`
+- `cargo build`, `cargo clippy`, `cargo fmt -- --check` all pass
+- Task 5 subtasks for running PostgreSQL left unchecked (requires running DB instance; test is `#[ignore]`)
+
+### Change Log
+
+- 2026-04-05: Story 1.2 implemented — database connection pool + system table bootstrap
+
 ### File List
+
+- `src/storage/mod.rs` (modified) — `init_pool()` + `bootstrap_system_tables()` implementations
+- `src/main.rs` (modified) — DB pool init + bootstrap calls after tracing init
+- `tests/bootstrap_test.rs` (new) — integration test for DDL idempotency

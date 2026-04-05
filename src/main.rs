@@ -1,5 +1,5 @@
 use clap::Parser;
-use tracing::info;
+use tracing::{error, info};
 
 use solarix::config::Config;
 
@@ -29,6 +29,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "solarix starting"
     );
 
-    // Future stories will add: DB pool, system tables, pipeline, API server
+    info!("connecting to database");
+    let pool = solarix::storage::init_pool(&config).await.map_err(|e| {
+        error!(error = %e, "failed to initialize database pool");
+        e
+    })?;
+
+    info!("bootstrapping system tables");
+    solarix::storage::bootstrap_system_tables(&pool)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "failed to bootstrap system tables");
+            e
+        })?;
+
+    info!("database ready");
+
+    // Future stories: pipeline, API server
     Ok(())
 }
