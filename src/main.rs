@@ -3,9 +3,12 @@ use std::time::Instant;
 
 use clap::Parser;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use solarix::config::Config;
+use solarix::idl::IdlManager;
+use solarix::registry::ProgramRegistry;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,6 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
+
+    let start_time = Instant::now();
 
     info!(
         rpc_url = %config.rpc_url,
@@ -49,8 +54,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("database ready");
 
-    let start_time = Instant::now();
-    let state = Arc::new(solarix::api::AppState { pool, start_time });
+    let idl_manager = IdlManager::new(config.rpc_url.clone());
+    let registry = ProgramRegistry::new(idl_manager, pool.clone());
+    let registry = Arc::new(RwLock::new(registry));
+    let state = Arc::new(solarix::api::AppState {
+        pool,
+        start_time,
+        registry,
+    });
     let app = solarix::api::router(state);
 
     let addr = format!("{}:{}", config.api_host, config.api_port);
@@ -78,8 +89,9 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| tracing::warn!(error = %e, "failed to install SIGTERM handler"))
+            .ok();
 
         tokio::select! {
             _ = ctrl_c => { tracing::info!("received SIGINT, shutting down"); },

@@ -1,14 +1,22 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
+use tokio::time::timeout;
 
 use super::AppState;
 
 pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let db_ok = sqlx::query("SELECT 1").fetch_one(&state.pool).await.is_ok();
+    let db_ok = timeout(
+        Duration::from_secs(2),
+        sqlx::query("SELECT 1").fetch_one(&state.pool),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false);
 
     let uptime = state.start_time.elapsed().as_secs();
     let version = env!("CARGO_PKG_VERSION");

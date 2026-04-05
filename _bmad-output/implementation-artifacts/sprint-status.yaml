@@ -1,5 +1,5 @@
 # generated: 2026-04-05
-# last_updated: 2026-04-05
+# last_updated: 2026-04-05 (stories 3-2, 3-3 code review done)
 # project: Solarix
 # project_key: NOKEY
 # tracking_system: file-system
@@ -66,10 +66,10 @@ development_status:
   # Estimated: 3 stories, 1 worktree
   # ============================================================================
 
-  epic-1: in-progress
+  epic-1: done
   1-1-project-scaffolding-and-configuration: done # Track A | deps: none
   1-2-database-connection-and-system-table-bootstrap: done # Track A | deps: 1.1
-  1-3-docker-compose-and-health-endpoint: review # Track A | deps: 1.1, 1.2
+  1-3-docker-compose-and-health-endpoint: done # Track A | deps: 1.1, 1.2
   epic-1-retrospective: optional
 
   # ============================================================================
@@ -84,16 +84,16 @@ development_status:
   # Estimated: 5 stories across 3 worktrees
   # ============================================================================
 
-  epic-2: backlog
-  2-1-idl-manager-and-on-chain-fetch: backlog # Track A | deps: 1.1 | files: src/idl/
-  2-2-manual-idl-upload-and-program-registration: backlog # Track A | deps: 2.1 | files: src/idl/, src/types.rs
+  epic-2: in-progress
+  2-1-idl-manager-and-on-chain-fetch: review # Track A | deps: 1.1 | files: src/idl/
+  2-2-manual-idl-upload-and-program-registration: review # Track A | deps: 2.1 | files: src/idl/, src/types.rs
   2-3-dynamic-schema-generation: backlog # Track A | deps: 2.2 | files: src/storage/schema.rs
 
-  epic-3: backlog
-  3-1-solarixdecoder-trait-and-instruction-decoding: backlog # Track B | deps: 1.1 | files: src/decoder/
-  3-2-account-state-decoding: backlog # Track B | deps: 3.1 | files: src/decoder/
+  epic-3: in-progress
+  3-1-solarixdecoder-trait-and-instruction-decoding: done # Track B | deps: 1.1 | files: src/decoder/
+  3-2-account-state-decoding: done # Track B | deps: 3.1 | files: src/decoder/
 
-  3-3-rpc-block-source-and-rate-limited-fetching: backlog # Track C | deps: 1.1 | files: src/pipeline/rpc.rs
+  3-3-rpc-block-source-and-rate-limited-fetching: done # Track C | deps: 1.1 | files: src/pipeline/rpc.rs
 
   # ============================================================================
   # SPRINT 3: Storage + API Foundation (2 parallel worktrees)

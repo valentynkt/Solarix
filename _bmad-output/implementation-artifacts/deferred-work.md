@@ -20,3 +20,10 @@
 - **`status` columns are unconstrained TEXT** — No CHECK constraint for valid pipeline state values on `programs.status` and `indexer_state.status`. Add constraints in a schema hardening pass.
 - **`db_pool_min > db_pool_max` not validated** — sqlx will error at runtime but no explicit validation. Config validation not yet planned (also noted in 1.1 review).
 - **Duplicate error output on failure** — `map_err(|e| { error!(...); e })?` logs via tracing then Rust prints Err to stderr. Clean up with graceful shutdown (story 4.3).
+
+## Deferred from: code review of 1-3-docker-compose-and-health-endpoint (2026-04-05)
+
+- **`rust:latest` / `debian:bookworm-slim` unpinned** — Non-reproducible Docker builds. Pin to specific versions when CI pipeline is set up (Story 6.4).
+- **No restart policy on compose services** — Crashed containers stay down. Add when pipeline orchestrator handles crash recovery (Story 4.3).
+- **Hardcoded credentials in docker-compose.yml** — Dev-only convenience. Address when deployment docs are written (Story 7.1).
+- **ApiError missing IntoResponse impl** — Explicitly scoped for Story 5.1 (also noted in 1.1 review).

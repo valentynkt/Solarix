@@ -7,6 +7,8 @@ services:
       POSTGRES_PASSWORD: solarix
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U solarix -d solarix"]
       interval: 5s
@@ -20,6 +22,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://solarix:solarix@postgres:5432/solarix
+      SOLANA_RPC_URL: "${SOLANA_RPC_URL:-https://api.devnet.solana.com}"
       SOLARIX_API_HOST: "0.0.0.0"
       SOLARIX_API_PORT: "3000"
       SOLARIX_LOG_FORMAT: "pretty"
@@ -31,3 +34,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+volumes:
+  postgres_data:

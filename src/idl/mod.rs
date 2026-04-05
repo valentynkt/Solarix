@@ -1,13 +1,186 @@
 pub mod fetch;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use anchor_lang_idl_spec::Idl;
+use sha2::{Digest, Sha256};
+use tracing::{debug, info, warn};
+
+use crate::idl::fetch::{fetch_idl_from_bundled, fetch_idl_from_chain};
+
+/// Source from which an IDL was acquired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdlSource {
+    OnChain,
+    Bundled,
+    Manual,
+}
+
+impl IdlSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IdlSource::OnChain => "onchain",
+            IdlSource::Bundled => "bundled",
+            IdlSource::Manual => "manual",
+        }
+    }
+}
+
+/// Cached IDL entry with metadata.
+#[derive(Debug, Clone)]
+pub struct CachedIdl {
+    pub idl: Idl,
+    pub hash: String,
+    pub source: IdlSource,
+}
+
 /// IDL manager: caches, parses, and provides IDL data for programs.
-pub struct IdlManager;
+///
+/// NOTE: AC6 concurrency (safe for concurrent readers) is handled by the
+/// `ProgramRegistry` wrapper in story 2.2 via `Arc<RwLock<ProgramRegistry>>`.
+pub struct IdlManager {
+    cache: HashMap<String, CachedIdl>,
+    rpc_url: String,
+    http_client: reqwest::Client,
+    bundled_idls_path: Option<PathBuf>,
+}
+
+impl IdlManager {
+    pub fn new(rpc_url: String) -> Self {
+        Self {
+            cache: HashMap::new(),
+            rpc_url,
+            http_client: reqwest::Client::new(),
+            bundled_idls_path: Some(PathBuf::from("idls")),
+        }
+    }
+
+    /// Retrieve an IDL for a program, using cache-first then fetch cascade.
+    pub async fn get_idl(&mut self, program_id: &str) -> Result<&Idl, IdlError> {
+        // P10: Use single lookup instead of contains_key + get
+        if self.cache.contains_key(program_id) {
+            debug!(program_id, "IDL cache hit");
+            return Ok(&self.cache[program_id].idl);
+        }
+
+        // Fetch cascade: on-chain -> bundled (D2: also try bundled on transient errors)
+        let (idl_json, source) =
+            match fetch_idl_from_chain(&self.http_client, &self.rpc_url, program_id).await {
+                Ok(json) => {
+                    info!(program_id, "fetched IDL from on-chain PDA");
+                    (json, IdlSource::OnChain)
+                }
+                Err(IdlError::NotFound(_)) => {
+                    debug!(program_id, "on-chain IDL not found, trying bundled");
+                    let json =
+                        fetch_idl_from_bundled(self.bundled_idls_path.as_deref(), program_id)?;
+                    info!(program_id, "loaded IDL from bundled directory");
+                    (json, IdlSource::Bundled)
+                }
+                Err(e) => {
+                    // D2: On transient fetch errors, try bundled before giving up
+                    warn!(program_id, error = %e, "on-chain fetch failed, trying bundled");
+                    match fetch_idl_from_bundled(self.bundled_idls_path.as_deref(), program_id) {
+                        Ok(json) => {
+                            info!(
+                                program_id,
+                                "loaded IDL from bundled directory (after fetch error)"
+                            );
+                            (json, IdlSource::Bundled)
+                        }
+                        Err(_) => return Err(e), // propagate original fetch error
+                    }
+                }
+            };
+
+        // Validate format before parsing into typed struct
+        let raw_value: serde_json::Value =
+            serde_json::from_str(&idl_json).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
+        validate_idl(&raw_value)?;
+
+        let hash = compute_idl_hash(&idl_json);
+
+        let idl: Idl =
+            serde_json::from_value(raw_value).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
+
+        let cached = CachedIdl { idl, hash, source };
+        self.cache.insert(program_id.to_string(), cached);
+
+        Ok(&self.cache[program_id].idl)
+    }
+
+    /// Read-only cache access — returns the IDL if previously cached.
+    pub fn get_cached(&self, program_id: &str) -> Option<&Idl> {
+        self.cache.get(program_id).map(|c| &c.idl)
+    }
+
+    /// Get the full cached entry (IDL + hash + source) if available.
+    pub fn get_cached_entry(&self, program_id: &str) -> Option<&CachedIdl> {
+        self.cache.get(program_id)
+    }
+
+    /// Return all cached program IDs.
+    pub fn cached_program_ids(&self) -> Vec<&str> {
+        self.cache.keys().map(|k| k.as_str()).collect()
+    }
+
+    /// Upload an IDL manually: validate, parse, cache with `Manual` source.
+    pub fn upload_idl(&mut self, program_id: &str, idl_json: &str) -> Result<&Idl, IdlError> {
+        let raw_value: serde_json::Value =
+            serde_json::from_str(idl_json).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
+        validate_idl(&raw_value)?;
+
+        let hash = compute_idl_hash(idl_json);
+        let idl: Idl =
+            serde_json::from_value(raw_value).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
+
+        let cached = CachedIdl {
+            idl,
+            hash,
+            source: IdlSource::Manual,
+        };
+        self.cache.insert(program_id.to_string(), cached);
+
+        Ok(&self.cache[program_id].idl)
+    }
+}
+
+/// Validate that the IDL JSON has a v0.30+ format (metadata.spec field).
+pub fn validate_idl(value: &serde_json::Value) -> Result<(), IdlError> {
+    match value.get("metadata").and_then(|m| m.get("spec")) {
+        Some(spec) if spec.is_string() => Ok(()),
+        Some(_) => Err(IdlError::UnsupportedFormat(
+            "metadata.spec must be a string".to_string(),
+        )),
+        None => Err(IdlError::UnsupportedFormat(
+            "missing metadata.spec field — only Anchor IDL v0.30+ is supported".to_string(),
+        )),
+    }
+}
+
+/// Compute a SHA-256 hash of the IDL JSON for change detection.
+///
+/// For deterministic hashing, re-parses and re-serializes the JSON through
+/// serde_json::Value to normalize key order, then hashes the result.
+pub fn compute_idl_hash(idl_json: &str) -> String {
+    // Parse and re-serialize for deterministic ordering
+    let normalized = match serde_json::from_str::<serde_json::Value>(idl_json) {
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| idl_json.to_string()),
+        Err(_) => idl_json.to_string(),
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(normalized.as_bytes());
+    let result = hasher.finalize();
+    result.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Errors that can occur during IDL operations.
 #[derive(Debug, thiserror::Error)]
 pub enum IdlError {
-    #[error("failed to fetch IDL: {0}")]
-    FetchFailed(String),
+    #[error("failed to fetch IDL for {program_id}: {reason}")]
+    FetchFailed { program_id: String, reason: String },
 
     #[error("failed to parse IDL: {0}")]
     ParseFailed(String),
@@ -17,4 +190,165 @@ pub enum IdlError {
 
     #[error("unsupported IDL format: {0}")]
     UnsupportedFormat(String),
+
+    #[error("IDL decompression failed: {0}")]
+    DecompressionFailed(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_v030_idl_json() -> String {
+        serde_json::json!({
+            "address": "11111111111111111111111111111111",
+            "metadata": {
+                "name": "test_program",
+                "version": "0.1.0",
+                "spec": "0.1.0"
+            },
+            "instructions": [],
+            "accounts": [],
+            "types": []
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn validate_idl_accepts_v030_format() {
+        let value: serde_json::Value =
+            serde_json::from_str(&sample_v030_idl_json()).expect("valid json");
+        assert!(validate_idl(&value).is_ok());
+    }
+
+    #[test]
+    fn validate_idl_rejects_missing_spec() {
+        let value = serde_json::json!({
+            "address": "11111111111111111111111111111111",
+            "metadata": {
+                "name": "old_program",
+                "version": "0.1.0"
+            },
+            "instructions": []
+        });
+        let err = validate_idl(&value).unwrap_err();
+        assert!(matches!(err, IdlError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn validate_idl_rejects_non_string_spec() {
+        let value = serde_json::json!({
+            "address": "11111111111111111111111111111111",
+            "metadata": {
+                "name": "bad_program",
+                "version": "0.1.0",
+                "spec": 42
+            },
+            "instructions": []
+        });
+        let err = validate_idl(&value).unwrap_err();
+        assert!(matches!(err, IdlError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn compute_idl_hash_is_consistent() {
+        let json = sample_v030_idl_json();
+        let h1 = compute_idl_hash(&json);
+        let h2 = compute_idl_hash(&json);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64); // SHA-256 hex = 64 chars
+    }
+
+    #[test]
+    fn compute_idl_hash_differs_for_different_input() {
+        let json_a = sample_v030_idl_json();
+        let json_b = serde_json::json!({
+            "address": "22222222222222222222222222222222",
+            "metadata": {
+                "name": "other_program",
+                "version": "0.2.0",
+                "spec": "0.1.0"
+            },
+            "instructions": []
+        })
+        .to_string();
+        assert_ne!(compute_idl_hash(&json_a), compute_idl_hash(&json_b));
+    }
+
+    #[test]
+    fn idl_manager_cache_returns_none_before_insert() {
+        let manager = IdlManager::new("http://localhost:8899".to_string());
+        assert!(manager.get_cached("SomeProgramId").is_none());
+    }
+
+    #[test]
+    fn idl_manager_cache_returns_some_after_upload() {
+        let mut manager = IdlManager::new("http://localhost:8899".to_string());
+        let json = sample_v030_idl_json();
+        manager
+            .upload_idl("TestProgram", &json)
+            .expect("upload_idl should succeed");
+        assert!(manager.get_cached("TestProgram").is_some());
+        assert_eq!(
+            manager.get_cached("TestProgram").map(|i| &i.metadata.name),
+            Some(&"test_program".to_string())
+        );
+    }
+
+    #[test]
+    fn idl_manager_cached_entry_has_correct_source() {
+        let mut manager = IdlManager::new("http://localhost:8899".to_string());
+        let json = sample_v030_idl_json();
+        manager
+            .upload_idl("TestProgram", &json)
+            .expect("upload_idl should succeed");
+        let entry = manager.get_cached_entry("TestProgram");
+        assert!(entry.is_some());
+        assert_eq!(entry.map(|e| &e.source), Some(&IdlSource::Manual));
+    }
+
+    #[test]
+    fn upload_idl_rejects_invalid_json() {
+        let mut manager = IdlManager::new("http://localhost:8899".to_string());
+        let err = manager.upload_idl("prog", "not json").unwrap_err();
+        assert!(matches!(err, IdlError::ParseFailed(_)));
+    }
+
+    #[test]
+    fn upload_idl_rejects_missing_spec() {
+        let mut manager = IdlManager::new("http://localhost:8899".to_string());
+        let json = serde_json::json!({
+            "address": "11111111111111111111111111111111",
+            "metadata": {
+                "name": "bad",
+                "version": "0.1.0"
+            },
+            "instructions": []
+        })
+        .to_string();
+        let err = manager.upload_idl("prog", &json).unwrap_err();
+        assert!(matches!(err, IdlError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn idl_source_as_str() {
+        assert_eq!(IdlSource::OnChain.as_str(), "onchain");
+        assert_eq!(IdlSource::Bundled.as_str(), "bundled");
+        assert_eq!(IdlSource::Manual.as_str(), "manual");
+    }
+
+    #[test]
+    fn cached_program_ids_returns_inserted_keys() {
+        let mut manager = IdlManager::new("http://localhost:8899".to_string());
+        let json = sample_v030_idl_json();
+        manager
+            .upload_idl("prog_a", &json)
+            .expect("upload should succeed");
+        manager
+            .upload_idl("prog_b", &json)
+            .expect("upload should succeed");
+        let mut ids = manager.cached_program_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["prog_a", "prog_b"]);
+    }
 }

@@ -6,11 +6,15 @@ use std::time::Instant;
 
 use axum::{routing::get, Router};
 use sqlx::PgPool;
+use tokio::sync::RwLock;
+
+use crate::registry::ProgramRegistry;
 
 /// Shared application state passed to all handlers.
 pub struct AppState {
     pub pool: PgPool,
     pub start_time: Instant,
+    pub registry: Arc<RwLock<ProgramRegistry>>,
 }
 
 /// Errors that can occur in API request handling.

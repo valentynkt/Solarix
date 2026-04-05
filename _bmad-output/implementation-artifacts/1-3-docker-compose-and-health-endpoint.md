@@ -1,6 +1,6 @@
 # Story 1.3: Docker Compose & Health Endpoint
 
-Status: review
+Status: done
 
 ## Story
 
@@ -448,6 +448,18 @@ All file paths match the architecture document. New files (`Dockerfile`, `docker
 - [Source: _bmad-output/planning-artifacts/prd.md#Deployment]
 - [Source: _bmad-output/implementation-artifacts/1-1-project-scaffolding-and-configuration.md]
 - [Source: _bmad-output/implementation-artifacts/1-2-database-connection-and-system-table-bootstrap.md]
+
+### Review Findings
+
+- [x] [Review][Patch] Missing SOLANA_RPC_URL in docker-compose.yml — defaults to mainnet silently [docker-compose.yml]
+- [x] [Review][Patch] No postgres volume — data lost on `docker compose down` [docker-compose.yml]
+- [x] [Review][Patch] SIGTERM handler silently swallows registration failure [src/main.rs:92]
+- [x] [Review][Patch] Uptime undercounts — start_time captured after DB bootstrap [src/main.rs:32]
+- [x] [Review][Patch] Health check SELECT 1 has no timeout — false unhealthy under pool saturation [src/api/handlers.rs:11]
+- [x] [Review][Defer] `rust:latest` / `debian:bookworm-slim` unpinned — non-reproducible builds [Dockerfile:2,9] — deferred, pre-existing pattern; pin when CI pipeline is set up (Story 6.4)
+- [x] [Review][Defer] No restart policy on compose services [docker-compose.yml] — deferred, add when pipeline orchestrator handles crash recovery (Story 4.3)
+- [x] [Review][Defer] Hardcoded credentials in docker-compose.yml [docker-compose.yml:5-7] — deferred, dev-only convenience; address when deployment docs are written (Story 7.1)
+- [x] [Review][Defer] ApiError missing IntoResponse impl [src/api/mod.rs:17-27] — deferred, explicitly scoped for Story 5.1
 
 ## Dev Agent Record
 
