@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| config.log_level.clone().into());
 
-    if config.log_format == "json" {
+    if config.log_format.eq_ignore_ascii_case("json") {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .json()

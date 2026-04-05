@@ -1,6 +1,6 @@
 # Story 1.1: Project Scaffolding & Configuration
 
-Status: review
+Status: done
 
 ## Story
 
@@ -431,15 +431,15 @@ All file paths match the architecture document exactly. 14 source files in `src/
 
 #### Decision Needed
 
-- [ ] [Review][Decision] **Solana crate versions: v2 vs v3** — Commented-out Solana crates (`solana-rpc-client-api`, `solana-pubsub-client`) are pinned to `"2"` but CLAUDE.md states "All Solana crates target v3.x ecosystem." Should these be updated to `"3"` now, or left as-is until uncommented in Epic 2/3? [Cargo.toml:39-40]
-- [ ] [Review][Decision] **RPITIT traits not object-safe** — `BlockSource`, `AccountSource`, and `TransactionStream` use `-> impl Future` (RPITIT) which prevents `dyn Trait` usage. Architecture spec describes these as "seams for testing" implying trait object support. Should these be converted to `#[async_trait]` or boxed futures now, or deferred to their implementation stories? [src/pipeline/rpc.rs, src/pipeline/ws.rs]
+- [x] [Review][Decision] **Solana crate versions: v2 vs v3** — RESOLVED: Fix now. Update commented crates to v3. Zero-risk comment change.
+- [x] [Review][Decision] **RPITIT traits not object-safe** — RESOLVED: Defer. Stubs will be rewritten in Stories 3.3/4.1. Add object safety to those stories' ACs.
 
 #### Patch
 
-- [ ] [Review][Patch] **`init_pool` returns `()` instead of pool handle** — `storage::init_pool` returns `Result<(), StorageError>`. This is structurally unusable — callers need the `PgPool`. Should return `Result<(), StorageError>` as a stub that documents it will become `Result<sqlx::PgPool, StorageError>`, or change the signature now. [src/storage/mod.rs:22]
-- [ ] [Review][Patch] **`log_format` case-sensitive with no validation** — `config.log_format == "json"` is exact match. `"JSON"`, `"Pretty"`, or typos like `"jsn"` silently fall through to pretty format. Fix: lowercase the comparison or use an enum. [src/main.rs:16]
-- [ ] [Review][Patch] **`channel_capacity = 0` causes tokio panic** — `tokio::sync::mpsc::channel(0)` panics. The config field accepts 0 as valid `usize`. Fix: change default or add `value_parser = clap::value_parser!(usize).range(1..)`. [src/config.rs:64]
-- [ ] [Review][Patch] **`QueryBuilder` name collides with `sqlx::QueryBuilder`** — The local `QueryBuilder` struct in `storage/queries.rs` shadows the sqlx type that the architecture spec explicitly uses. Rename to `DynamicQueryBuilder` or `SolarixQueryBuilder`. [src/storage/queries.rs:2]
+- [x] [Review][Patch] **`init_pool` returns `()` instead of pool handle** — Already fixed in working tree (returns `PgPool`).
+- [x] [Review][Patch] **`log_format` case-sensitive with no validation** — Fixed: `eq_ignore_ascii_case("json")`. [src/main.rs:16]
+- [x] [Review][Patch] **`channel_capacity = 0` causes tokio panic** — Fixed: added `parse_nonzero_usize` value parser. [src/config.rs:63-64]
+- [x] [Review][Patch] **`QueryBuilder` name collides with `sqlx::QueryBuilder`** — Fixed: renamed to `DynamicQueryBuilder`. [src/storage/queries.rs:2]
 
 #### Deferred
 

@@ -36,8 +36,8 @@ backon = "1"
 # Solana (types only for now -- actual usage in later stories)
 # chainparser = { git = "https://github.com/valentynkit/chainparser", branch = "solarix-v3" }
 # anchor-lang-idl-spec = "0.1.0"
-# solana-rpc-client-api = "2"
-# solana-pubsub-client = "2"
+# solana-rpc-client-api = "3"
+# solana-pubsub-client = "3"
 
 [dev-dependencies]
 proptest = "1"

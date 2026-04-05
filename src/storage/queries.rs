@@ -1,2 +1,2 @@
 /// Dynamic query builder for API reads.
-pub struct QueryBuilder;
+pub struct DynamicQueryBuilder;

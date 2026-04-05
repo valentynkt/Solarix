@@ -29,6 +29,35 @@ pub enum StorageError {
     CheckpointFailed(String),
 }
 
+/// Strip password from a database URL for safe logging.
+///
+/// Replaces `://user:password@` with `://user:***@`.
+fn sanitize_database_url(url: &str) -> String {
+    // Pattern: scheme://user:password@host...
+    // Find the credentials section between :// and @
+    let Some(scheme_end) = url.find("://") else {
+        return "<invalid-url>".to_string();
+    };
+    let after_scheme = scheme_end + 3;
+    let Some(at_pos) = url[after_scheme..].find('@') else {
+        // No credentials in URL
+        return url.to_string();
+    };
+    let credentials = &url[after_scheme..after_scheme + at_pos];
+    if let Some(colon) = credentials.find(':') {
+        let user = &credentials[..colon];
+        format!(
+            "{}://{}:***@{}",
+            &url[..scheme_end],
+            user,
+            &url[after_scheme + at_pos + 1..]
+        )
+    } else {
+        // No password in credentials
+        url.to_string()
+    }
+}
+
 /// Initialize a database connection pool.
 pub async fn init_pool(config: &Config) -> Result<PgPool, StorageError> {
     let pool = PgPoolOptions::new()
@@ -40,7 +69,10 @@ pub async fn init_pool(config: &Config) -> Result<PgPool, StorageError> {
         .connect(&config.database_url)
         .await
         .map_err(|e| {
-            StorageError::ConnectionFailed(format!("failed to connect to database: {e}"))
+            let sanitized = sanitize_database_url(&config.database_url);
+            StorageError::ConnectionFailed(format!(
+                "failed to connect to database ({sanitized}): {e}"
+            ))
         })?;
 
     info!(
@@ -72,8 +104,8 @@ pub async fn bootstrap_system_tables(pool: &PgPool) -> Result<(), StorageError> 
             "last_processed_slot" BIGINT,
             "last_heartbeat"      TIMESTAMPTZ,
             "error_message"       TEXT,
-            "total_instructions"  BIGINT DEFAULT 0,
-            "total_accounts"      BIGINT DEFAULT 0
+            "total_instructions"  BIGINT NOT NULL DEFAULT 0,
+            "total_accounts"      BIGINT NOT NULL DEFAULT 0
         );
     "#;
 

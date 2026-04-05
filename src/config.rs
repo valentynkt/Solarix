@@ -1,5 +1,13 @@
 use clap::Parser;
 
+fn parse_nonzero_usize(s: &str) -> Result<usize, String> {
+    let val: usize = s.parse().map_err(|e| format!("{e}"))?;
+    if val == 0 {
+        return Err("value must be at least 1".to_string());
+    }
+    Ok(val)
+}
+
 /// Solarix universal Solana indexer configuration.
 #[derive(Parser, Debug, Clone)]
 #[command(name = "solarix", about = "Universal Solana indexer")]
@@ -60,7 +68,7 @@ pub struct Config {
     pub api_max_page_size: u32,
 
     // === Pipeline ===
-    #[arg(long, env = "SOLARIX_CHANNEL_CAPACITY", default_value_t = 256)]
+    #[arg(long, env = "SOLARIX_CHANNEL_CAPACITY", default_value_t = 256, value_parser = parse_nonzero_usize)]
     pub channel_capacity: usize,
 
     #[arg(long, env = "SOLARIX_CHECKPOINT_INTERVAL_SECS", default_value_t = 10)]

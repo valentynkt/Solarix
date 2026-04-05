@@ -1,6 +1,6 @@
 # Story 1.2: Database Connection & System Table Bootstrap
 
-Status: review
+Status: done
 
 ## Story
 
@@ -336,6 +336,17 @@ None — clean implementation with no blockers.
 ### Change Log
 
 - 2026-04-05: Story 1.2 implemented — database connection pool + system table bootstrap
+
+### Review Findings
+
+- [x] [Review][Patch] `total_instructions`/`total_accounts` should be `NOT NULL DEFAULT 0` — fixed
+- [x] [Review][Patch] AC5: Add sanitized connection details (host/port/db, no password) to connection failure log — fixed, added `sanitize_database_url()`
+- [x] [Review][Patch] Integration test uses `unwrap()` — switched to `expect()` (allowed via clippy.toml)
+- [x] [Review][Defer] `updated_at` column has no auto-update trigger — will go stale on UPDATE [src/storage/mod.rs:67] — deferred, pre-existing design; address in story 3.4 (storage writer)
+- [x] [Review][Defer] Bootstrap DDL not wrapped in explicit transaction — partial failure risk [src/storage/mod.rs:80-83] — deferred, low real-world risk with IF NOT EXISTS
+- [x] [Review][Defer] `status` columns are unconstrained TEXT — no CHECK for valid state values [src/storage/mod.rs:64,71] — deferred, schema hardening pass
+- [x] [Review][Defer] `db_pool_min > db_pool_max` not validated at config level [src/storage/mod.rs:35-36] — deferred, config validation not yet planned
+- [x] [Review][Defer] Duplicate error output on failure (tracing error! + Rust Debug print) [src/main.rs:33-44] — deferred, clean up with graceful shutdown (story 4.3)
 
 ### File List
 
