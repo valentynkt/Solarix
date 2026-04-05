@@ -1,0 +1,26 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+_bmad/_config
+_bmad/bmm
+_bmad/cis
+_bmad/core/bmad-advanced-elicitation
+_bmad/core/bmad-brainstorming
+_bmad/core/bmad-distillator
+_bmad/core/bmad-editorial-review-prose
+_bmad/core

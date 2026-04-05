@@ -1,0 +1,175 @@
+# generated: 2026-04-05
+# last_updated: 2026-04-05
+# project: Solarix
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+#
+# PARALLEL DEVELOPMENT STRATEGY:
+# ==============================
+# Solo developer using multiple Claude Code sessions in separate git worktrees.
+# Each parallel track (A, B, C) runs in its own worktree/branch simultaneously.
+# Stories within a track are sequential. Tracks within a sprint are parallel.
+# Sprint N+1 begins only after all Sprint N tracks merge to main.
+#
+# CRITICAL PATH (longest chain):
+#   1.1 → 1.2 → 1.3 → 2.1 → 2.2 → 2.3 → 3.4 → 3.5 → 4.1 → 4.2 → 4.3 → 7.1 → 7.2
+#
+# MERGE STRATEGY:
+#   After each sprint, all worktree branches merge to main before next sprint starts.
+#   This ensures each sprint's stories build on a stable, integrated codebase.
+
+generated: 2026-04-05
+last_updated: 2026-04-05
+project: Solarix
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  # ============================================================================
+  # SPRINT 1: Foundation (sequential — no parallelism, everything depends on this)
+  # ============================================================================
+  # Single track. Sets up project structure, DB, Docker, health endpoint.
+  # All subsequent sprints depend on Sprint 1 being fully merged to main.
+  #
+  # Track A: epic-1 stories in sequence
+  # Estimated: 3 stories, 1 worktree
+  # ============================================================================
+
+  epic-1: in-progress
+  1-1-project-scaffolding-and-configuration: ready-for-dev # Track A | deps: none
+  1-2-database-connection-and-system-table-bootstrap: ready-for-dev # Track A | deps: 1.1
+  1-3-docker-compose-and-health-endpoint: backlog # Track A | deps: 1.1, 1.2
+  epic-1-retrospective: optional
+
+  # ============================================================================
+  # SPRINT 2: Core Modules (3 parallel worktrees)
+  # ============================================================================
+  # After Epic 1 merges, three independent modules can be built simultaneously.
+  # Each track touches different files/modules with no overlap.
+  #
+  # Track A: IDL subsystem        → src/idl/
+  # Track B: Decoder subsystem    → src/decoder/, src/types.rs
+  # Track C: RPC client           → src/pipeline/rpc.rs
+  # Estimated: 5 stories across 3 worktrees
+  # ============================================================================
+
+  epic-2: backlog
+  2-1-idl-manager-and-on-chain-fetch: backlog # Track A | deps: 1.1 | files: src/idl/
+  2-2-manual-idl-upload-and-program-registration: backlog # Track A | deps: 2.1 | files: src/idl/, src/types.rs
+  2-3-dynamic-schema-generation: backlog # Track A | deps: 2.2 | files: src/storage/schema.rs
+
+  epic-3: backlog
+  3-1-solarixdecoder-trait-and-instruction-decoding: backlog # Track B | deps: 1.1 | files: src/decoder/
+  3-2-account-state-decoding: backlog # Track B | deps: 3.1 | files: src/decoder/
+
+  3-3-rpc-block-source-and-rate-limited-fetching: backlog # Track C | deps: 1.1 | files: src/pipeline/rpc.rs
+
+  # ============================================================================
+  # SPRINT 3: Storage + API Foundation (2 parallel worktrees)
+  # ============================================================================
+  # After Sprint 2 merges, the storage writer needs schema (2.3) + decoder (3.1/3.2)
+  # + RPC (3.3). Meanwhile, API endpoints need ProgramRegistry (2.2) + axum (1.3).
+  #
+  # Track A: Storage writer + pipeline orchestrator → src/storage/writer.rs, src/pipeline/mod.rs
+  # Track B: API program endpoints + query builder  → src/api/, src/storage/queries.rs
+  # Estimated: 4 stories across 2 worktrees
+  # ============================================================================
+
+  3-4-storage-writer-and-atomic-checkpointing: backlog # Track A | deps: 2.3, 3.1, 3.2, 3.3 | files: src/storage/writer.rs
+  3-5-batch-indexing-pipeline-orchestrator: backlog # Track A | deps: 3.3, 3.4 | files: src/pipeline/mod.rs
+
+  epic-5: backlog
+  5-1-program-management-endpoints: backlog # Track B | deps: 2.2, 1.3 | files: src/api/
+  5-2-dynamic-query-builder-and-filters: backlog # Track B | deps: 2.3 | files: src/api/filters.rs, src/storage/queries.rs
+
+  epic-2-retrospective: optional
+  epic-3-retrospective: optional
+
+  # ============================================================================
+  # SPRINT 4: Streaming + API Queries (2 parallel worktrees)
+  # ============================================================================
+  # After Sprint 3 merges, streaming needs the pipeline (3.5) and API queries
+  # need the query builder (5.2) + data in DB (3.4).
+  #
+  # Track A: WebSocket streaming pipeline → src/pipeline/ws.rs, src/pipeline/mod.rs
+  # Track B: Query endpoints + aggregation → src/api/handlers.rs
+  # Estimated: 5 stories across 2 worktrees
+  # ============================================================================
+
+  epic-4: backlog
+  4-1-websocket-transaction-stream: backlog # Track A | deps: 3.3, 3.1 | files: src/pipeline/ws.rs
+  4-2-streaming-pipeline-and-gap-detection: backlog # Track A | deps: 4.1, 3.5 | files: src/pipeline/mod.rs
+  4-3-cold-start-and-graceful-shutdown: backlog # Track A | deps: 4.2 | files: src/pipeline/mod.rs, src/main.rs
+
+  5-3-instruction-and-account-query-endpoints: backlog # Track B | deps: 5.2, 3.4 | files: src/api/handlers.rs
+  5-4-aggregation-statistics-and-health-enhancement: backlog # Track B | deps: 5.3 | files: src/api/handlers.rs
+
+  epic-4-retrospective: optional
+  epic-5-retrospective: optional
+
+  # ============================================================================
+  # SPRINT 5: Hardening & Tests (3 parallel worktrees)
+  # ============================================================================
+  # After Sprint 4 merges, testing and observability are independent of each other.
+  # Tracing can be woven across all modules. Unit tests and integration tests
+  # touch different files.
+  #
+  # Track A: Structured tracing   → spans + logging across all modules
+  # Track B: Unit/property tests  → tests/decode_roundtrip.rs, tests/schema_generation.rs
+  # Track C: Integration + API tests → tests/pipeline_integration.rs, tests/api_integration.rs
+  # Estimated: 4 stories across 3 worktrees
+  # ============================================================================
+
+  epic-6: backlog
+  6-1-structured-tracing-and-observability: backlog # Track A | deps: 1.1 (but best after 4.x) | files: across all modules
+  6-2-core-module-tests: backlog # Track B | deps: 3.1, 2.3 | files: tests/
+  6-3-integration-and-api-tests: backlog # Track C | deps: 5.x, 3.5 | files: tests/
+  6-4-ci-pipeline: backlog # Sequential after A+B+C merge | files: .github/
+
+  epic-6-retrospective: optional
+
+  # ============================================================================
+  # SPRINT 6: Documentation & Demo (sequential)
+  # ============================================================================
+  # Final polish. README needs the full system working. Demo script validates
+  # the entire flow end-to-end. No parallelism — these are holistic tasks.
+  #
+  # Track A: Documentation and demo
+  # Estimated: 2 stories, 1 worktree
+  # ============================================================================
+
+  epic-7: backlog
+  7-1-readme-and-architecture-documentation: backlog # Track A | deps: all epics | files: README.md, docs/
+  7-2-demo-script-and-bounty-submission-polish: backlog # Track A | deps: 7.1 | files: demo.sh, README.md, src/**
+  epic-7-retrospective: optional
