@@ -125,3 +125,8 @@ these as known technical debt; stories still in-progress have blocking items not
 - **JSONB range comparisons use text ordering, not numeric** — `src/storage/queries.rs:134-143`. `("data"->>'field') > $1` compares as TEXT, so `"10" < "9"`. Pre-existing from story 5.2 query builder. Fix requires casting to numeric in SQL.
 - **Registry vs DB schema dropped externally yields generic 500** — `src/api/handlers.rs`. If schema is dropped by external DBA action, registry check passes but data queries fail with `QueryFailed`. Pre-existing architectural issue; no simple fix without schema existence checks.
 - **Cursor key insufficiency (instruction_index not in cursor tuple)** — `src/api/handlers.rs:585-593`. Cursor uses `(slot, signature)` but multiple instructions in the same transaction can share this key. Could cause skipped/duplicated rows at page boundaries. Changes API contract; extremely rare (same-name ixs in one tx). Defer to post-MVP.
+
+## Deferred from: code review of 5-4-aggregation-statistics-and-health-enhancement (2026-04-07)
+
+- **No `from <= to` validation in `instruction_count`** — `src/api/handlers.rs`. When `from > to`, the query silently returns empty results rather than a 400 error. Not a crash; usability improvement. Defer to post-MVP.
+- **Health `programs` field is `null` instead of `[]` when DB is down** — `src/api/handlers.rs:109-112`. Spec says "array of per-program status" but the field is `null` (not `[]`) when the DB query fails or DB is unreachable. Cosmetic inconsistency; clients should handle both.

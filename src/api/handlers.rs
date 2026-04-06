@@ -500,11 +500,10 @@ fn decode_cursor(cursor: &str) -> Result<(i64, String), ApiError> {
 fn map_query_error(e: sqlx::Error) -> ApiError {
     if let sqlx::Error::Database(ref db_err) = e {
         if let Some(code) = db_err.code() {
-            if code == "22P02" || code == "22003" {
-                return ApiError::InvalidValue(format!(
-                    "filter value type mismatch: {}",
-                    db_err.message()
-                ));
+            if code == "22P02" || code == "22003" || code == "22008" {
+                // Log the full message for debugging, return generic message to caller
+                tracing::warn!(pg_code = %code, detail = %db_err.message(), "query type/value error");
+                return ApiError::InvalidValue("filter value type mismatch".to_string());
             }
         }
     }
@@ -632,13 +631,12 @@ pub async fn query_instructions(
 
     // Build query base (SELECT + FROM + WHERE), then inject cursor before ORDER BY/LIMIT
     let fetch_limit = limit + 1;
-    let (mut qb, _) = build_query_base(&target, &resolved);
+    let (mut qb, has_where) = build_query_base(&target, &resolved);
 
     // Inject cursor condition before ORDER BY/LIMIT
     if let Some(ref cursor) = cursor_param {
         let (cursor_slot, cursor_sig) = decode_cursor(cursor)?;
-        // instruction_name filter ensures WHERE exists, so AND is safe
-        qb.push(" AND (");
+        qb.push(if has_where { " AND (" } else { " WHERE (" });
         qb.push(r#""slot" < "#);
         qb.push_bind(cursor_slot);
         qb.push(r#" OR ("slot" = "#);
@@ -921,7 +919,10 @@ pub async fn instruction_count(
         qb.push_bind(to_val);
     }
 
-    qb.push(" GROUP BY bucket ORDER BY bucket ASC");
+    // Cap result set to prevent OOM on wide time ranges with fine granularity
+    const MAX_BUCKETS: i64 = 10_000;
+    qb.push(" GROUP BY bucket ORDER BY bucket ASC LIMIT ");
+    qb.push_bind(MAX_BUCKETS + 1);
 
     let start = std::time::Instant::now();
     let rows = qb
@@ -930,6 +931,13 @@ pub async fn instruction_count(
         .await
         .map_err(map_query_error)?;
     let query_time_ms = start.elapsed().as_millis() as u64;
+
+    if rows.len() as i64 > MAX_BUCKETS {
+        return Err(ApiError::InvalidValue(format!(
+            "query produced more than {} time buckets. Narrow the time range or use a coarser interval",
+            MAX_BUCKETS
+        )));
+    }
 
     let data: Vec<Value> = rows
         .iter()
@@ -992,11 +1000,12 @@ pub async fn program_stats(
 
     let (total_instructions, total_accounts) = match state_row {
         Some(row) => {
-            let ti: i64 = row.get("total_instructions");
-            let ta: i64 = row.get("total_accounts");
-            (ti, ta)
+            let ti: Option<i64> = row.get("total_instructions");
+            let ta: Option<i64> = row.get("total_accounts");
+            (ti.unwrap_or(0), ta.unwrap_or(0))
         }
-        None => return Err(ApiError::ProgramNotFound(id)),
+        // Program exists (get_schema_name succeeded) but indexer hasn't started yet
+        None => (0, 0),
     };
 
     let mut first_seen_slot: Option<i64> = None;

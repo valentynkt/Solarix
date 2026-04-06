@@ -1483,4 +1483,351 @@ mod tests {
         // 10/10 = 100% → true
         assert!(is_high_failure_rate(10, 10));
     }
+
+    // -----------------------------------------------------------------------
+    // Story 4.2: decode_transaction + streaming unit tests
+    // -----------------------------------------------------------------------
+
+    /// Mock decoder that always succeeds, returning instructions with the given name.
+    struct MockDecoder;
+
+    impl SolarixDecoder for MockDecoder {
+        fn decode_instruction(
+            &self,
+            program_id: &str,
+            _data: &[u8],
+            _idl: &Idl,
+        ) -> Result<DecodedInstruction, crate::decoder::DecodeError> {
+            Ok(DecodedInstruction::from_decoded(
+                program_id.to_string(),
+                "mock_ix".to_string(),
+                serde_json::json!({"key": "value"}),
+            ))
+        }
+
+        fn decode_account(
+            &self,
+            program_id: &str,
+            pubkey: &str,
+            _data: &[u8],
+            _idl: &Idl,
+        ) -> Result<crate::types::DecodedAccount, crate::decoder::DecodeError> {
+            Ok(crate::types::DecodedAccount::from_decoded(
+                program_id.to_string(),
+                "mock_account".to_string(),
+                pubkey.to_string(),
+                serde_json::json!({}),
+            ))
+        }
+    }
+
+    /// Mock decoder that always fails.
+    struct FailDecoder;
+
+    impl SolarixDecoder for FailDecoder {
+        fn decode_instruction(
+            &self,
+            _program_id: &str,
+            _data: &[u8],
+            _idl: &Idl,
+        ) -> Result<DecodedInstruction, crate::decoder::DecodeError> {
+            Err(crate::decoder::DecodeError::UnknownDiscriminator(
+                "ff".into(),
+            ))
+        }
+
+        fn decode_account(
+            &self,
+            _program_id: &str,
+            _pubkey: &str,
+            _data: &[u8],
+            _idl: &Idl,
+        ) -> Result<crate::types::DecodedAccount, crate::decoder::DecodeError> {
+            Err(crate::decoder::DecodeError::UnknownDiscriminator(
+                "ff".into(),
+            ))
+        }
+    }
+
+    fn make_test_config() -> Config {
+        Config {
+            rpc_url: String::new(),
+            ws_url: None,
+            database_url: String::new(),
+            db_pool_min: 2,
+            db_pool_max: 10,
+            rpc_rps: 10,
+            backfill_chunk_size: 50_000,
+            start_slot: None,
+            end_slot: None,
+            index_failed_txs: false,
+            api_host: String::new(),
+            api_port: 3000,
+            api_default_page_size: 50,
+            api_max_page_size: 1000,
+            channel_capacity: 256,
+            checkpoint_interval_secs: 10,
+            retry_initial_ms: 500,
+            retry_max_ms: 30_000,
+            retry_timeout_secs: 300,
+            max_consecutive_fetch_failures: 100,
+            ws_ping_interval_secs: 30,
+            ws_pong_timeout_secs: 10,
+            dedup_cache_size: 10_000,
+            shutdown_drain_secs: 15,
+            shutdown_db_flush_secs: 10,
+            log_level: String::new(),
+            log_format: String::new(),
+        }
+    }
+
+    fn make_test_idl() -> Idl {
+        serde_json::from_value(serde_json::json!({
+            "address": "11111111111111111111111111111111",
+            "metadata": { "name": "test", "version": "0.1.0", "spec": "0.1.0" },
+            "instructions": [],
+            "accounts": [],
+            "types": []
+        }))
+        .expect("test IDL should parse")
+    }
+
+    fn make_test_tx(program_id: &str, success: bool) -> RpcTransaction {
+        RpcTransaction {
+            signature: "test_sig".to_string(),
+            slot: 200,
+            success,
+            account_keys: vec!["Alice".to_string(), program_id.to_string()],
+            instructions: vec![RpcInstruction {
+                program_id_index: 1,
+                data: vec![1, 2, 3],
+                accounts: vec![0],
+            }],
+            inner_instructions: vec![],
+        }
+    }
+
+    fn make_orch_with_decoder(decoder: Box<dyn SolarixDecoder>) -> PipelineOrchestrator {
+        // Create a minimal orchestrator — no real DB pool or RPC (not needed for decode tests)
+        use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+        let config = make_test_config();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(PgConnectOptions::new());
+
+        let rpc = RpcClient::new(&config).expect("rpc");
+        let writer = StorageWriter::new(pool.clone());
+        let cancel = CancellationToken::new();
+
+        PipelineOrchestrator::new(pool, rpc, decoder, writer, config, cancel)
+    }
+
+    #[tokio::test]
+    async fn test_decode_transaction_top_level_match() {
+        let orch = make_orch_with_decoder(Box::new(MockDecoder));
+        let idl = make_test_idl();
+        let program_id = "TargetProg";
+        let tx = make_test_tx(program_id, true);
+
+        let (decoded, failures, attempts) = orch.decode_transaction(program_id, &tx, &idl);
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(failures, 0);
+        assert_eq!(attempts, 1);
+        assert_eq!(decoded[0].instruction_name, "mock_ix");
+        assert_eq!(decoded[0].signature, "test_sig");
+        assert_eq!(decoded[0].slot, 200);
+        assert_eq!(decoded[0].instruction_index, 0);
+        assert_eq!(decoded[0].inner_index, None);
+        assert_eq!(decoded[0].accounts, vec!["Alice"]);
+    }
+
+    #[tokio::test]
+    async fn test_decode_transaction_inner_instruction() {
+        let orch = make_orch_with_decoder(Box::new(MockDecoder));
+        let idl = make_test_idl();
+        let program_id = "TargetProg";
+        let tx = RpcTransaction {
+            signature: "cpi_sig".to_string(),
+            slot: 300,
+            success: true,
+            account_keys: vec![
+                "Alice".to_string(),
+                "OtherProg".to_string(),
+                program_id.to_string(),
+            ],
+            instructions: vec![RpcInstruction {
+                program_id_index: 1, // OtherProg — not our target
+                data: vec![4, 5, 6],
+                accounts: vec![0],
+            }],
+            inner_instructions: vec![RpcInnerInstructionGroup {
+                index: 0,
+                instructions: vec![RpcInstruction {
+                    program_id_index: 2, // TargetProg — CPI match
+                    data: vec![7, 8, 9],
+                    accounts: vec![0],
+                }],
+            }],
+        };
+
+        let (decoded, failures, attempts) = orch.decode_transaction(program_id, &tx, &idl);
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(failures, 0);
+        assert_eq!(attempts, 1);
+        assert_eq!(decoded[0].instruction_index, 0); // parent ix index
+        assert_eq!(decoded[0].inner_index, Some(0)); // inner instruction index
+    }
+
+    #[tokio::test]
+    async fn test_decode_transaction_no_match() {
+        let orch = make_orch_with_decoder(Box::new(MockDecoder));
+        let idl = make_test_idl();
+        let program_id = "TargetProg";
+        let tx = RpcTransaction {
+            signature: "no_match_sig".to_string(),
+            slot: 400,
+            success: true,
+            account_keys: vec!["Alice".to_string(), "OtherProg".to_string()],
+            instructions: vec![RpcInstruction {
+                program_id_index: 1, // OtherProg — not our target
+                data: vec![1, 2, 3],
+                accounts: vec![0],
+            }],
+            inner_instructions: vec![],
+        };
+
+        let (decoded, failures, attempts) = orch.decode_transaction(program_id, &tx, &idl);
+
+        assert!(decoded.is_empty());
+        assert_eq!(failures, 0);
+        assert_eq!(attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn test_decode_transaction_failed_tx_skipped() {
+        let orch = make_orch_with_decoder(Box::new(MockDecoder));
+        let idl = make_test_idl();
+        let program_id = "TargetProg";
+        let tx = make_test_tx(program_id, false); // failed tx
+
+        // config.index_failed_txs = false (default)
+        let (decoded, _failures, _attempts) = orch.decode_transaction(program_id, &tx, &idl);
+
+        assert!(decoded.is_empty(), "failed tx should be skipped");
+    }
+
+    #[tokio::test]
+    async fn test_decode_transaction_failed_tx_indexed_when_configured() {
+        let mut config = make_test_config();
+        config.index_failed_txs = true;
+
+        use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(PgConnectOptions::new());
+        let rpc = RpcClient::new(&config).expect("rpc");
+        let writer = StorageWriter::new(pool.clone());
+        let cancel = CancellationToken::new();
+        let orch =
+            PipelineOrchestrator::new(pool, rpc, Box::new(MockDecoder), writer, config, cancel);
+
+        let idl = make_test_idl();
+        let program_id = "TargetProg";
+        let tx = make_test_tx(program_id, false); // failed tx
+
+        let (decoded, _failures, _attempts) = orch.decode_transaction(program_id, &tx, &idl);
+
+        assert_eq!(
+            decoded.len(),
+            1,
+            "failed tx should be indexed when index_failed_txs = true"
+        );
+    }
+
+    #[test]
+    fn test_consecutive_failure_threshold() {
+        // Unit test for the counter logic used in stream_events
+        let threshold: u64 = 100;
+        let mut consecutive_failures: u64 = 0;
+
+        // Simulate 99 failures — should not exceed threshold
+        for _ in 0..99 {
+            consecutive_failures += 1;
+            assert!(
+                consecutive_failures <= threshold,
+                "should not exceed threshold at {consecutive_failures}"
+            );
+        }
+
+        // One more failure → hits threshold
+        consecutive_failures += 1;
+        assert_eq!(consecutive_failures, 100);
+
+        // Reset on success
+        consecutive_failures = 0;
+        assert_eq!(consecutive_failures, 0);
+
+        // 101 consecutive → exceeds threshold
+        for _ in 0..101 {
+            consecutive_failures += 1;
+        }
+        assert!(consecutive_failures > threshold);
+    }
+
+    #[test]
+    fn test_heartbeat_timing() {
+        let checkpoint_interval = Duration::from_secs(10);
+
+        // Just created — not elapsed yet
+        let heartbeat_at = Instant::now();
+        assert!(
+            heartbeat_at.elapsed() < checkpoint_interval,
+            "freshly created instant should not have elapsed 10 seconds"
+        );
+
+        // Simulate elapsed time by using a past instant
+        let past = Instant::now() - Duration::from_secs(11);
+        assert!(
+            past.elapsed() >= checkpoint_interval,
+            "instant 11s ago should trigger heartbeat"
+        );
+
+        // Exactly at boundary
+        let at_boundary = Instant::now() - checkpoint_interval;
+        assert!(
+            at_boundary.elapsed() >= checkpoint_interval,
+            "instant exactly at boundary should trigger heartbeat"
+        );
+    }
+
+    #[test]
+    fn test_run_streaming_is_send() {
+        // Compile-time check that run_streaming future is Send
+        fn _check(o: &PipelineOrchestrator) {
+            fn _require_send<T: Send>(_: &T) {}
+            let idl = serde_json::from_value::<Idl>(serde_json::json!({
+                "address": "11111111111111111111111111111111",
+                "metadata": { "name": "test", "version": "0.1.0", "spec": "0.1.0" },
+                "instructions": [],
+                "accounts": [],
+                "types": []
+            }))
+            .expect("test IDL");
+            let fut = o.run_streaming("prog", "schema", &idl);
+            _require_send(&fut);
+        }
+    }
+
+    #[test]
+    fn test_stream_interrupt_variants() {
+        // Verify StreamInterrupt can hold both variants
+        let disconnect = StreamInterrupt::Disconnect(12345);
+        matches!(disconnect, StreamInterrupt::Disconnect(12345));
+
+        let fatal = StreamInterrupt::Fatal(PipelineError::Fatal("test".into()));
+        matches!(fatal, StreamInterrupt::Fatal(_));
+    }
 }

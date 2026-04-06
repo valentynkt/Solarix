@@ -1,6 +1,6 @@
 # Story 5.4: Aggregation, Statistics & Health Enhancement
 
-Status: review
+Status: done
 
 ## Story
 
@@ -68,6 +68,17 @@ so that I can understand program usage patterns and indexing progress.
   - [x] `cargo clippy` passes
   - [x] `cargo fmt -- --check` passes
   - [x] `cargo test` all tests pass
+
+### Review Findings
+
+- [x] [Review][Patch] P1: `instruction_count` unbounded result set — added LIMIT 10001 + error when >10k buckets [`handlers.rs:924`]
+- [x] [Review][Patch] P2: `program_stats` returns 404 for registered program without `indexer_state` row — now defaults to (0, 0) [`handlers.rs:993`]
+- [x] [Review][Patch] P3: `map_query_error` leaks DB error message to API caller — now logs detail server-side, returns generic message [`handlers.rs:500`]
+- [x] [Review][Patch] P4: `program_stats` panics on NULL totals — fixed in P2 by using `Option<i64>` with `unwrap_or(0)` [`handlers.rs:994`]
+- [x] [Review][Patch] P5: Cursor injection ignores `has_where` flag — now uses returned `has_where` to decide WHERE vs AND [`handlers.rs:635`]
+- [x] [Review][Patch] P6: Missing PG error code `22008` (datetime overflow) in `map_query_error` — added to code check [`handlers.rs:503`]
+- [x] [Review][Defer] D1: No `from <= to` validation in `instruction_count` — deferred, returns empty result (not a crash)
+- [x] [Review][Defer] D2: Health `programs` field is `null` instead of `[]` when DB is down — deferred, cosmetic
 
 ## Dev Notes
 

@@ -107,6 +107,13 @@ pub struct Config {
     #[arg(long, env = "SOLARIX_DEDUP_CACHE_SIZE", default_value_t = 10_000, value_parser = parse_nonzero_usize)]
     pub dedup_cache_size: usize,
 
+    // === Shutdown ===
+    #[arg(long, env = "SOLARIX_SHUTDOWN_DRAIN_SECS", default_value_t = 15)]
+    pub shutdown_drain_secs: u64,
+
+    #[arg(long, env = "SOLARIX_SHUTDOWN_DB_FLUSH_SECS", default_value_t = 10)]
+    pub shutdown_db_flush_secs: u64,
+
     // === Logging ===
     #[arg(long, env = "SOLARIX_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
