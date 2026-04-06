@@ -133,67 +133,102 @@ impl ProgramRegistry {
         pool: PgPool,
         data: RegistrationData,
     ) -> Result<ProgramInfo, RegistrationError> {
+        let RegistrationData {
+            program_id,
+            program_name,
+            schema_name,
+            idl_hash,
+            idl_source,
+            idl,
+            was_cached: _,
+        } = data;
+
         Self::write_registration(
             pool.clone(),
-            data.program_id.clone(),
-            data.program_name.clone(),
-            data.schema_name.clone(),
-            data.idl_hash.clone(),
-            data.idl_source.clone(),
+            program_id.clone(),
+            program_name.clone(),
+            schema_name.clone(),
+            idl_hash.clone(),
+            idl_source.clone(),
         )
         .await?;
 
+        let idl_for_schema = idl.clone();
         let status = match generate_schema(
             pool.clone(),
-            data.idl.clone(),
-            data.program_id.clone(),
-            data.schema_name.clone(),
+            idl_for_schema,
+            program_id.clone(),
+            schema_name.clone(),
         )
         .await
         {
             Ok(()) => {
+                // Consume idl by move — last usage
                 if let Err(e) = seed_metadata(
                     pool.clone(),
-                    data.idl.clone(),
-                    data.program_id.clone(),
-                    data.idl_hash.clone(),
-                    data.schema_name.clone(),
+                    idl,
+                    program_id.clone(),
+                    idl_hash.clone(),
+                    schema_name.clone(),
                 )
                 .await
                 {
                     warn!(
-                        program_id = %data.program_id,
-                        schema_name = %data.schema_name,
+                        program_id = %program_id,
+                        schema_name = %schema_name,
                         error = %e,
                         "metadata seeding failed (schema was created successfully)"
                     );
                 }
 
-                Self::update_program_status(
+                match Self::update_program_status(
                     pool.clone(),
-                    data.program_id.clone(),
+                    program_id.clone(),
                     "schema_created".to_string(),
                 )
-                .await?;
-                "schema_created".to_string()
+                .await
+                {
+                    Ok(()) => "schema_created".to_string(),
+                    Err(e) => {
+                        warn!(
+                            program_id = %program_id,
+                            error = %e,
+                            "failed to update status to schema_created, attempting error status"
+                        );
+                        if let Err(e2) = Self::update_program_status(
+                            pool.clone(),
+                            program_id.clone(),
+                            "error".to_string(),
+                        )
+                        .await
+                        {
+                            error!(
+                                program_id = %program_id,
+                                error = %e2,
+                                "failed to update program status to 'error'"
+                            );
+                        }
+                        return Err(RegistrationError::DatabaseError(e.to_string()));
+                    }
+                }
             }
             Err(e) => {
                 warn!(
-                    program_id = %data.program_id,
-                    schema_name = %data.schema_name,
+                    program_id = %program_id,
+                    schema_name = %schema_name,
                     error = %e,
                     "schema generation failed"
                 );
 
                 if let Err(update_err) = Self::update_program_status(
                     pool.clone(),
-                    data.program_id.clone(),
+                    program_id.clone(),
                     "error".to_string(),
                 )
                 .await
                 {
                     error!(
-                        program_id = %data.program_id,
+                        program_id = %program_id,
                         error = %update_err,
                         "failed to update program status to 'error'"
                     );
@@ -204,20 +239,20 @@ impl ProgramRegistry {
         };
 
         info!(
-            program_id = %data.program_id,
-            program_name = %data.program_name,
-            schema_name = %data.schema_name,
-            idl_source = %data.idl_source,
+            program_id = %program_id,
+            program_name = %program_name,
+            schema_name = %schema_name,
+            idl_source = %idl_source,
             status = %status,
             "program registered with schema"
         );
 
         Ok(ProgramInfo {
-            program_id: data.program_id,
-            program_name: data.program_name,
-            schema_name: data.schema_name,
-            idl_hash: data.idl_hash,
-            idl_source: data.idl_source,
+            program_id,
+            program_name,
+            schema_name,
+            idl_hash,
+            idl_source,
             status,
         })
     }
@@ -267,21 +302,10 @@ impl ProgramRegistry {
                 .await
                 .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
 
-            let exists: bool = sqlx::query_scalar(
-                r#"SELECT EXISTS(SELECT 1 FROM "programs" WHERE "program_id" = $1)"#,
-            )
-            .bind(&program_id)
-            .fetch_one(tx.as_mut())
-            .await
-            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
-
-            if exists {
-                return Err(RegistrationError::AlreadyRegistered(program_id));
-            }
-
-            sqlx::query(
+            let result = sqlx::query(
                 r#"INSERT INTO "programs" ("program_id", "program_name", "schema_name", "idl_hash", "idl_source", "status")
-                   VALUES ($1, $2, $3, $4, $5, 'registered')"#,
+                   VALUES ($1, $2, $3, $4, $5, 'registered')
+                   ON CONFLICT ("program_id") DO NOTHING"#,
             )
             .bind(&program_id)
             .bind(&program_name)
@@ -290,15 +314,11 @@ impl ProgramRegistry {
             .bind(&idl_source)
             .execute(tx.as_mut())
             .await
-            .map_err(|e| {
-                // Catch PG unique violation (23505) from concurrent registration race
-                if let sqlx::Error::Database(ref db_err) = e {
-                    if db_err.code().as_deref() == Some("23505") {
-                        return RegistrationError::AlreadyRegistered(program_id.clone());
-                    }
-                }
-                RegistrationError::DatabaseError(e.to_string())
-            })?;
+            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
+            if result.rows_affected() == 0 {
+                return Err(RegistrationError::AlreadyRegistered(program_id));
+            }
 
             sqlx::query(
                 r#"INSERT INTO "indexer_state" ("program_id", "status", "total_instructions", "total_accounts")

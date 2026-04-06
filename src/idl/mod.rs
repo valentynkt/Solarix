@@ -2,6 +2,7 @@ pub mod fetch;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anchor_lang_idl_spec::Idl;
 use sha2::{Digest, Sha256};
@@ -59,10 +60,15 @@ pub struct IdlManager {
 
 impl IdlManager {
     pub fn new(rpc_url: String) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             cache: HashMap::new(),
             rpc_url,
-            http_client: reqwest::Client::new(),
+            http_client,
             bundled_idls_path: Some(PathBuf::from("idls")),
         }
     }

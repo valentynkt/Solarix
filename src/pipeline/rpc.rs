@@ -287,6 +287,11 @@ impl RpcClient {
             return Err(PipelineError::RateLimited);
         }
         if !status.is_success() {
+            // 4xx client errors (except 429 handled above) are non-retryable
+            if status.is_client_error() {
+                return Err(PipelineError::Fatal(format!("HTTP {status}")));
+            }
+            // 5xx and other errors are retryable
             return Err(PipelineError::RpcFailed(format!("HTTP {status}")));
         }
 
@@ -729,13 +734,10 @@ mod tests {
             code: -32009,
             message: "Slot 123 was skipped".into(),
         });
-        match err {
-            PipelineError::SlotSkipped(_) => {}
-            other => {
-                eprintln!("expected SlotSkipped, got: {other}");
-                std::process::exit(1);
-            }
-        }
+        assert!(
+            matches!(err, PipelineError::SlotSkipped(_)),
+            "expected SlotSkipped, got: {err}"
+        );
     }
 
     #[test]
@@ -745,13 +747,10 @@ mod tests {
                 code,
                 message: "block not available".into(),
             });
-            match err {
-                PipelineError::SlotSkipped(_) => {}
-                other => {
-                    eprintln!("expected SlotSkipped for code {code}, got: {other}");
-                    std::process::exit(1);
-                }
-            }
+            assert!(
+                matches!(err, PipelineError::SlotSkipped(_)),
+                "expected SlotSkipped for code {code}, got: {err}"
+            );
         }
     }
 
@@ -763,10 +762,7 @@ mod tests {
         });
         match err {
             PipelineError::RpcFailed(msg) => assert!(msg.starts_with("node behind")),
-            other => {
-                eprintln!("expected RpcFailed, got: {other}");
-                std::process::exit(1);
-            }
+            other => panic!("expected RpcFailed, got: {other}"),
         }
     }
 
@@ -777,13 +773,10 @@ mod tests {
                 code,
                 message: "bad".into(),
             });
-            match err {
-                PipelineError::Fatal(_) => {}
-                other => {
-                    eprintln!("expected Fatal for code {code}, got: {other}");
-                    std::process::exit(1);
-                }
-            }
+            assert!(
+                matches!(err, PipelineError::Fatal(_)),
+                "expected Fatal for code {code}, got: {err}"
+            );
         }
     }
 
@@ -902,10 +895,7 @@ mod tests {
         });
 
         // With index_failed_txs = false, should filter out the failed tx
-        let block = parse_block(42, json.clone(), false).unwrap_or_else(|e| {
-            eprintln!("parse_block failed: {e}");
-            std::process::exit(1);
-        });
+        let block = parse_block(42, json.clone(), false).expect("parse_block failed");
 
         assert_eq!(block.slot, 42);
         assert_eq!(block.block_time, Some(1_700_000_000));
@@ -926,10 +916,7 @@ mod tests {
         );
 
         // With index_failed_txs = true, should keep both
-        let block_all = parse_block(42, json, true).unwrap_or_else(|e| {
-            eprintln!("parse_block failed: {e}");
-            std::process::exit(1);
-        });
+        let block_all = parse_block(42, json, true).expect("parse_block failed");
 
         assert_eq!(block_all.transactions.len(), 2);
         assert!(!block_all.transactions[1].success);
@@ -938,12 +925,58 @@ mod tests {
     #[test]
     fn test_parse_get_blocks_response() {
         let json = serde_json::json!([100, 200, 300, 400]);
-        let slots: Vec<u64> = serde_json::from_value(json).unwrap_or_else(|e| {
-            eprintln!("parse failed: {e}");
-            std::process::exit(1);
-        });
+        let slots: Vec<u64> = serde_json::from_value(json).expect("parse failed");
 
         assert_eq!(slots, vec![100, 200, 300, 400]);
+    }
+
+    // -- Test: v0 loadedAddresses merged into account keys (AC7) --
+
+    #[test]
+    fn test_parse_block_with_loaded_addresses() {
+        let json = serde_json::json!({
+            "blockTime": 1_700_000_000i64,
+            "transactions": [
+                {
+                    "transaction": {
+                        "message": {
+                            "accountKeys": ["staticKey1", "staticKey2"],
+                            "instructions": [
+                                {
+                                    "programIdIndex": 1,
+                                    "data": "11",
+                                    "accounts": [0]
+                                }
+                            ]
+                        },
+                        "signatures": ["v0TxSig"]
+                    },
+                    "meta": {
+                        "err": null,
+                        "innerInstructions": [],
+                        "loadedAddresses": {
+                            "writable": ["loadedWritable1", "loadedWritable2"],
+                            "readonly": ["loadedReadonly1"]
+                        }
+                    }
+                }
+            ]
+        });
+
+        let block = parse_block(100, json, false).expect("parse_block with loadedAddresses");
+
+        assert_eq!(block.transactions.len(), 1);
+        let tx = &block.transactions[0];
+        assert_eq!(
+            tx.account_keys,
+            vec![
+                "staticKey1",
+                "staticKey2",
+                "loadedWritable1",
+                "loadedWritable2",
+                "loadedReadonly1",
+            ]
+        );
     }
 
     // -- Task 7.6: Test batch pubkeys --
@@ -993,10 +1026,7 @@ mod tests {
         let original = vec![1u8, 2, 3, 4, 5];
         let encoded = base64::engine::general_purpose::STANDARD.encode(&original);
         let data = vec![encoded, "base64".to_string()];
-        let decoded = decode_base64_account_data(&data).unwrap_or_else(|e| {
-            eprintln!("decode failed: {e}");
-            std::process::exit(1);
-        });
+        let decoded = decode_base64_account_data(&data).expect("decode failed");
         assert_eq!(decoded, original);
     }
 

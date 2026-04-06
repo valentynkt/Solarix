@@ -51,9 +51,6 @@ pub struct Config {
     #[arg(long, env = "SOLARIX_INDEX_FAILED_TXS", default_value_t = false)]
     pub index_failed_txs: bool,
 
-    #[arg(long, env = "SOLARIX_TX_ENCODING", default_value = "base64")]
-    pub tx_encoding: String,
-
     // === API ===
     #[arg(long, env = "SOLARIX_API_HOST", default_value = "0.0.0.0")]
     pub api_host: String,

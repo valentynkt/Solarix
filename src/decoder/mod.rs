@@ -1,5 +1,6 @@
 // std library
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 // external crates
 use anchor_lang_idl_spec::{
@@ -8,6 +9,7 @@ use anchor_lang_idl_spec::{
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tracing::{debug, warn};
 
 // internal crate
 use crate::types::{DecodedAccount, DecodedInstruction};
@@ -56,6 +58,7 @@ pub enum DecodeError {
 // TypeRegistry — resolves named types from IDL
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct TypeRegistry {
     types: HashMap<String, IdlTypeDef>,
 }
@@ -122,6 +125,7 @@ fn find_instruction_with_fallback<'a>(
         }
         let computed = compute_instruction_discriminator(&ix.name);
         if data.len() >= 8 && data[..8] == computed[..] {
+            debug!(instruction = %ix.name, "matched instruction via SHA-256 fallback discriminator");
             return Ok(ix);
         }
     }
@@ -131,6 +135,7 @@ fn find_instruction_with_fallback<'a>(
     } else {
         hex_encode(data)
     };
+    warn!(discriminator = %hex, "unknown instruction discriminator");
     Err(DecodeError::UnknownDiscriminator(hex))
 }
 
@@ -167,6 +172,7 @@ fn find_account_with_fallback<'a>(
         }
         let computed = compute_account_discriminator(&acct.name);
         if data.len() >= 8 && data[..8] == computed[..] {
+            debug!(account = %acct.name, "matched account via SHA-256 fallback discriminator");
             return Ok(acct);
         }
     }
@@ -176,6 +182,7 @@ fn find_account_with_fallback<'a>(
     } else {
         hex_encode(data)
     };
+    warn!(discriminator = %hex, "unknown account discriminator");
     Err(DecodeError::UnknownDiscriminator(hex))
 }
 
@@ -228,6 +235,26 @@ read_le!(read_f32, f32, 4);
 read_le!(read_f64, f64, 8);
 read_le!(read_u128, u128, 16);
 read_le!(read_i128, i128, 16);
+
+fn format_non_finite_f32(v: f32) -> String {
+    if v.is_nan() {
+        "NaN".to_string()
+    } else if v == f32::INFINITY {
+        "Infinity".to_string()
+    } else {
+        "-Infinity".to_string()
+    }
+}
+
+fn format_non_finite_f64(v: f64) -> String {
+    if v.is_nan() {
+        "NaN".to_string()
+    } else if v == f64::INFINITY {
+        "Infinity".to_string()
+    } else {
+        "-Infinity".to_string()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Core recursive type decoder
@@ -286,7 +313,11 @@ fn decode_type(
         }
         IdlType::F32 => {
             let (v, n) = read_f32(data, offset)?;
-            Ok((json!(v), n))
+            if v.is_finite() {
+                Ok((json!(v), n))
+            } else {
+                Ok((Value::String(format_non_finite_f32(v)), n))
+            }
         }
         IdlType::U64 => {
             let (v, n) = read_u64(data, offset)?;
@@ -298,7 +329,11 @@ fn decode_type(
         }
         IdlType::F64 => {
             let (v, n) = read_f64(data, offset)?;
-            Ok((json!(v), n))
+            if v.is_finite() {
+                Ok((json!(v), n))
+            } else {
+                Ok((Value::String(format_non_finite_f64(v)), n))
+            }
         }
 
         // Large integers -> JSON strings to prevent precision loss
@@ -714,9 +749,42 @@ fn decode_struct_fields(
 // ChainparserDecoder — SolarixDecoder implementation
 // ---------------------------------------------------------------------------
 
-/// Stateless decoder that deserializes Borsh-encoded instruction/account data
-/// using Anchor IDL type information.
-pub struct ChainparserDecoder;
+/// Decoder that deserializes Borsh-encoded instruction/account data
+/// using Anchor IDL type information. Caches TypeRegistry per-IDL for reuse.
+pub struct ChainparserDecoder {
+    registry_cache: Mutex<HashMap<String, TypeRegistry>>,
+}
+
+impl ChainparserDecoder {
+    pub fn new() -> Self {
+        Self {
+            registry_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get_or_build_registry(&self, idl: &Idl) -> TypeRegistry {
+        let key = &idl.address;
+        let mut cache = self
+            .registry_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = cache.get(key) {
+            return existing.clone();
+        }
+        let registry = TypeRegistry::from_idl(idl);
+        cache.insert(key.clone(), registry.clone());
+        cache
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| TypeRegistry::from_idl(idl))
+    }
+}
+
+impl Default for ChainparserDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SolarixDecoder for ChainparserDecoder {
     fn decode_instruction(
@@ -726,7 +794,7 @@ impl SolarixDecoder for ChainparserDecoder {
         idl: &Idl,
     ) -> Result<DecodedInstruction, DecodeError> {
         let ix = find_instruction_with_fallback(data, idl)?;
-        let registry = TypeRegistry::from_idl(idl);
+        let registry = self.get_or_build_registry(idl);
         let generics = HashMap::new();
 
         let disc_len = if ix.discriminator.is_empty() {
@@ -745,6 +813,15 @@ impl SolarixDecoder for ChainparserDecoder {
             offset += consumed;
         }
 
+        if offset < data.len() {
+            debug!(
+                program_id,
+                instruction = %ix.name,
+                trailing_bytes = data.len() - offset,
+                "instruction data has trailing bytes after decoding"
+            );
+        }
+
         Ok(DecodedInstruction::from_decoded(
             program_id.to_string(),
             ix.name.clone(),
@@ -761,7 +838,7 @@ impl SolarixDecoder for ChainparserDecoder {
     ) -> Result<DecodedAccount, DecodeError> {
         let account = find_account_with_fallback(data, idl)?;
 
-        let registry = TypeRegistry::from_idl(idl);
+        let registry = self.get_or_build_registry(idl);
         let type_def = registry.resolve(&account.name)?;
 
         check_serialization(&type_def.serialization)?;
@@ -781,7 +858,16 @@ impl SolarixDecoder for ChainparserDecoder {
         }
 
         let generics = HashMap::new();
-        let (value, _consumed) = decode_typedef(data, disc_len, type_def, &registry, &generics, 0)?;
+        let (value, consumed) = decode_typedef(data, disc_len, type_def, &registry, &generics, 0)?;
+
+        if disc_len + consumed < data.len() {
+            debug!(
+                program_id,
+                account_type = %account.name,
+                trailing_bytes = data.len() - disc_len - consumed,
+                "account data has trailing bytes after decoding"
+            );
+        }
 
         Ok(DecodedAccount::from_decoded(
             program_id.to_string(),
@@ -864,7 +950,7 @@ mod tests {
         data.push(1); // flag = true
         data.push(7); // count = 7
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -897,7 +983,7 @@ mod tests {
         let pubkey_bytes = [1u8; 32];
         data.extend_from_slice(&pubkey_bytes);
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -943,7 +1029,7 @@ mod tests {
         data.extend_from_slice(&1000u64.to_le_bytes()); // max_supply
         data.push(1); // active = true
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -998,7 +1084,7 @@ mod tests {
         data.push(0); // variant index 0 = Deposit
         data.extend_from_slice(&500u64.to_le_bytes()); // amount
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -1036,7 +1122,7 @@ mod tests {
         data.extend_from_slice(&big_u.to_le_bytes());
         data.extend_from_slice(&big_i.to_le_bytes());
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -1061,7 +1147,7 @@ mod tests {
 
         let data = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04];
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let err = decoder
             .decode_instruction("prog1", &data, &idl)
             .unwrap_err();
@@ -1109,7 +1195,7 @@ mod tests {
         let mut data = disc.to_vec();
         data.extend_from_slice(&100u64.to_le_bytes());
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let err = decoder
             .decode_instruction("prog1", &data, &idl)
             .unwrap_err();
@@ -1132,7 +1218,7 @@ mod tests {
         let disc = compute_instruction_discriminator("ping");
         let data = disc.to_vec();
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -1141,12 +1227,12 @@ mod tests {
         assert_eq!(result.args, json!({}));
     }
 
-    // -- Test: decode_account returns placeholder error --
+    // -- Test: empty IDL accounts returns unknown discriminator error --
 
     #[test]
-    fn test_decode_account_stub() {
+    fn test_decode_account_no_accounts_in_idl() {
         let idl = make_test_idl(vec![], vec![]);
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let err = decoder
             .decode_account("prog1", "pubkey1", &[], &idl)
             .unwrap_err();
@@ -1155,7 +1241,7 @@ mod tests {
             DecodeError::UnknownDiscriminator(_) => {
                 // Expected: no accounts defined in IDL, so discriminator lookup fails
             }
-            other => panic!("expected UnsupportedType, got: {other}"),
+            other => panic!("expected UnknownDiscriminator, got: {other}"),
         }
     }
 
@@ -1178,7 +1264,7 @@ mod tests {
         let mut data = disc.to_vec();
         data.extend_from_slice(&99u32.to_le_bytes());
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -1212,7 +1298,7 @@ mod tests {
         data.extend_from_slice(&2u32.to_le_bytes());
         data.extend_from_slice(b"hi");
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -1235,7 +1321,7 @@ mod tests {
         let mut data = disc.to_vec();
         data.push(0); // None
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_instruction("prog1", &data, &idl)
             .expect("decode should succeed");
@@ -1306,7 +1392,7 @@ mod tests {
         data.extend_from_slice(&99u64.to_le_bytes());
         data.push(1); // is_active = true
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_account("prog1", "acct_pubkey", &data, &idl)
             .expect("decode should succeed");
@@ -1366,7 +1452,7 @@ mod tests {
         data.extend_from_slice(&1000u64.to_le_bytes()); // settings.max_supply
         data.push(0); // settings.active = false
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_account("prog1", "vault_pk", &data, &idl)
             .expect("decode should succeed");
@@ -1434,7 +1520,7 @@ mod tests {
         data.push(1); // variant 1 = Active
         data.extend_from_slice(&1700000000i64.to_le_bytes()); // since
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_account("prog1", "order_pk", &data, &idl)
             .expect("decode should succeed");
@@ -1476,7 +1562,7 @@ mod tests {
         data.extend_from_slice(&3u32.to_le_bytes());
         data.extend_from_slice(&[10, 20, 30]);
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_account("prog1", "listing_pk", &data, &idl)
             .expect("decode should succeed");
@@ -1518,7 +1604,7 @@ mod tests {
         let authority_bytes = [7u8; 32];
         data.extend_from_slice(&authority_bytes);
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_account("prog1", "mint_pk", &data, &idl)
             .expect("decode should succeed");
@@ -1563,7 +1649,7 @@ mod tests {
         // supply field follows
         data.extend_from_slice(&1000000u64.to_le_bytes());
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_account("prog1", "mint_pk", &data, &idl)
             .expect("decode should succeed");
@@ -1596,7 +1682,7 @@ mod tests {
         let data = [
             0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00,
         ];
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let err = decoder
             .decode_account("prog1", "bad_pk", &data, &idl)
             .unwrap_err();
@@ -1623,7 +1709,7 @@ mod tests {
         let mut data = disc.to_vec();
         data.extend_from_slice(&[0u8; 8]);
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let err = decoder
             .decode_account("prog1", "pk", &data, &idl)
             .unwrap_err();
@@ -1687,13 +1773,71 @@ mod tests {
         let mut data = disc.to_vec();
         data.extend_from_slice(&42u64.to_le_bytes());
 
-        let decoder = ChainparserDecoder;
+        let decoder = ChainparserDecoder::new();
         let result = decoder
             .decode_account("prog1", "counter_pk", &data, &idl)
             .expect("decode should succeed");
 
         assert_eq!(result.account_type, "Counter");
         assert_eq!(result.data["count"], json!(42u64));
+    }
+
+    // -- Test: f32/f64 non-finite values produce JSON strings (AC6) --
+
+    #[test]
+    fn test_f32_nan_infinity() {
+        let ix = make_instruction(
+            "floats",
+            vec![
+                make_field("nan_val", IdlType::F32),
+                make_field("pos_inf", IdlType::F32),
+                make_field("neg_inf", IdlType::F32),
+            ],
+        );
+        let idl = make_test_idl(vec![ix], vec![]);
+
+        let disc = compute_instruction_discriminator("floats");
+        let mut data = disc.to_vec();
+        data.extend_from_slice(&f32::NAN.to_le_bytes());
+        data.extend_from_slice(&f32::INFINITY.to_le_bytes());
+        data.extend_from_slice(&f32::NEG_INFINITY.to_le_bytes());
+
+        let decoder = ChainparserDecoder::new();
+        let result = decoder
+            .decode_instruction("prog1", &data, &idl)
+            .expect("decode should succeed");
+
+        assert_eq!(result.args["nan_val"], json!("NaN"));
+        assert_eq!(result.args["pos_inf"], json!("Infinity"));
+        assert_eq!(result.args["neg_inf"], json!("-Infinity"));
+    }
+
+    #[test]
+    fn test_f64_nan_infinity() {
+        let ix = make_instruction(
+            "doubles",
+            vec![
+                make_field("nan_val", IdlType::F64),
+                make_field("pos_inf", IdlType::F64),
+                make_field("neg_inf", IdlType::F64),
+            ],
+        );
+        let idl = make_test_idl(vec![ix], vec![]);
+
+        let disc = compute_instruction_discriminator("doubles");
+        let mut data = disc.to_vec();
+        data.extend_from_slice(&f64::NAN.to_le_bytes());
+        data.extend_from_slice(&f64::INFINITY.to_le_bytes());
+        data.extend_from_slice(&f64::NEG_INFINITY.to_le_bytes());
+
+        let decoder = ChainparserDecoder::new();
+        let result = decoder
+            .decode_instruction("prog1", &data, &idl)
+            .expect("decode should succeed");
+
+        assert_eq!(result.args["nan_val"], json!("NaN"));
+        assert_eq!(result.args["pos_inf"], json!("Infinity"));
+        assert_eq!(result.args["neg_inf"], json!("-Infinity"));
     }
 
     // -- Test: COption with variable-size inner type errors --

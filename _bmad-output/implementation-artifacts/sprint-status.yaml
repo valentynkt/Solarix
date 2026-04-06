@@ -1,5 +1,5 @@
 # generated: 2026-04-05
-# last_updated: 2026-04-06 (story 2-2 review round 2 complete, all patches applied)
+# last_updated: 2026-04-06 (story 3-4 created, sprint status synced)
 # project: Solarix
 # project_key: NOKEY
 # tracking_system: file-system
@@ -49,7 +49,7 @@
 #   This ensures each sprint's stories build on a stable, integrated codebase.
 
 generated: 2026-04-05
-last_updated: 2026-04-06
+last_updated: 2026-04-06T23:30:00
 project: Solarix
 project_key: NOKEY
 tracking_system: file-system
@@ -84,10 +84,10 @@ development_status:
   # Estimated: 5 stories across 3 worktrees
   # ============================================================================
 
-  epic-2: in-progress
+  epic-2: done
   2-1-idl-manager-and-on-chain-fetch: done # Track A | deps: 1.1 | files: src/idl/ | NOTE: P2/P3 fixes in deferred-work.md (reqwest timeout, hash test)
   2-2-manual-idl-upload-and-program-registration: done # Track A | deps: 2.1 | files: src/idl/, src/types.rs, src/registry.rs, src/api/ | Review round 2 complete, all patches applied
-  2-3-dynamic-schema-generation: in-progress # Track A | deps: 2.2 | files: src/storage/schema.rs
+  2-3-dynamic-schema-generation: done # Track A | deps: 2.2 | files: src/storage/schema.rs
 
   epic-3: done
   3-1-solarixdecoder-trait-and-instruction-decoding: done # Track B | deps: 1.1 | files: src/decoder/ | NOTE: P2 f32/f64 NaN fix, P3 test gaps — see deferred-work.md
@@ -106,7 +106,8 @@ development_status:
   # Estimated: 4 stories across 2 worktrees
   # ============================================================================
 
-  3-4-storage-writer-and-atomic-checkpointing: backlog # Track A | deps: 2.3, 3.1, 3.2, 3.3 | files: src/storage/writer.rs
+  tech-debt-sweep-sprint-2-3: done # Track B | deps: none | files: rpc.rs, handlers.rs, idl/mod.rs, registry.rs, decoder/mod.rs, config.rs | P1+P2 fixes from done stories
+  3-4-storage-writer-and-atomic-checkpointing: ready-for-dev # Track A | deps: 2.3, 3.1, 3.2, 3.3 | files: src/storage/writer.rs
   3-5-batch-indexing-pipeline-orchestrator: backlog # Track A | deps: 3.3, 3.4 | files: src/pipeline/mod.rs
 
   epic-5: in-progress

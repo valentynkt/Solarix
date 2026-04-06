@@ -106,9 +106,11 @@ async fn do_register(
         .map_err(|e| ApiError::InvalidRequest(format!("invalid IDL JSON: {e}")))?;
 
     // Auto-fetch: if no IDL provided, fetch via on-chain -> bundled cascade
-    if idl_json.is_none() {
-        auto_fetch_idl(Arc::clone(&registry), body.program_id.clone()).await?;
-    }
+    let idl_was_auto_fetched = if idl_json.is_none() {
+        auto_fetch_idl(Arc::clone(&registry), body.program_id.clone()).await?
+    } else {
+        false
+    };
 
     let data = prepare_registration(Arc::clone(&registry), body.program_id, idl_json).await?;
 
@@ -116,7 +118,10 @@ async fn do_register(
     let program_id_for_rollback = data.program_id.clone();
     let result = ProgramRegistry::commit_registration(pool, data).await;
 
-    if result.is_err() && !was_cached {
+    // Rollback cache if we added the entry during this request:
+    // - Manual upload that wasn't previously cached (!was_cached), OR
+    // - Auto-fetched IDL (was_cached is true post-fetch, but we just added it)
+    if result.is_err() && (!was_cached || idl_was_auto_fetched) {
         rollback_cache(registry, program_id_for_rollback).await;
     }
 
@@ -129,7 +134,7 @@ async fn do_register(
     );
 
     Ok((
-        StatusCode::ACCEPTED,
+        StatusCode::CREATED,
         Json(json!({
             "data": {
                 "program_id": program_info.program_id,
@@ -178,16 +183,20 @@ fn rollback_cache(
 /// Acquires read lock to check cache and get fetch params, drops it,
 /// performs async fetch (no lock held), acquires write lock to cache
 /// the result, drops it.
+///
+/// Returns `true` if a new IDL was fetched and cached, `false` if it was
+/// already cached (no-op). Used by the caller to decide whether to rollback
+/// the cache entry on registration failure.
 fn auto_fetch_idl(
     registry: Arc<tokio::sync::RwLock<ProgramRegistry>>,
     program_id: String,
-) -> Pin<Box<dyn Future<Output = Result<(), ApiError>> + Send>> {
+) -> Pin<Box<dyn Future<Output = Result<bool, ApiError>> + Send>> {
     Box::pin(async move {
         // Check cache + get fetch params under one read lock
         let params = {
             let guard = registry.read().await;
             if guard.idl_manager.get_cached(&program_id).is_some() {
-                return Ok(());
+                return Ok(false);
             }
             guard.idl_manager.fetch_params()
         };
@@ -206,7 +215,7 @@ fn auto_fetch_idl(
                 .map_err(|e| ApiError::IdlError(e.to_string()))?;
         }
 
-        Ok(())
+        Ok(true)
     })
 }
 
@@ -266,8 +275,8 @@ pub async fn get_program(
     let program_id: String = row.get("program_id");
     let program_name: String = row.get("program_name");
     let schema_name: String = row.get("schema_name");
-    let idl_source: String = row.get("idl_source");
-    let idl_hash: String = row.get("idl_hash");
+    let idl_source: Option<String> = row.get("idl_source");
+    let idl_hash: Option<String> = row.get("idl_hash");
     let status: String = row.get("status");
     let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
     let updated_at: Option<chrono::DateTime<chrono::Utc>> = row.get("updated_at");
