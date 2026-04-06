@@ -464,6 +464,18 @@ None — clean build on first attempt.
 - `StorageWriter` wrapped in `Arc` for sharing between orchestrator and writer task
 - Design note: writer field changed from `StorageWriter` to `Arc<StorageWriter>` to support sharing with the spawned writer task
 
+### Review Findings
+
+- [ ] [Review][Patch] P1: Writer task drain loop aborts on first write error, dropping remaining batches [mod.rs:618-634]
+- [ ] [Review][Patch] P2: run_backfill leaves indexer_state.status="backfilling" on failure — should set "failed" [mod.rs:313-319]
+- [ ] [Review][Patch] P3: run_account_snapshot loads all decoded accounts into memory before write — OOM risk for large programs [mod.rs:517-566]
+- [ ] [Review][Patch] P4: get_transaction silently accepts empty signatures vec via unwrap_or_default [rpc.rs:466-471]
+- [ ] [Review][Patch] P5: log_progress uses end_slot - start_slot without saturating_sub [mod.rs:147]
+- [ ] [Review][Patch] P6: enrich_instruction silently drops OOB account indices without warn log [mod.rs:687-690]
+- [x] [Review][Defer] D1: run_account_snapshot non-atomic slot+accounts fetch — deferred, fundamental RPC limitation
+- [x] [Review][Defer] D2: u64 as i64 cast in update_indexer_state without overflow guard — deferred, Solana slots well within i64::MAX
+- [x] [Review][Defer] D3: process_chunk skips failed blocks without skip counter — deferred, gap detection is story 4.2
+
 ### Change Log
 
 - 2026-04-06: Initial implementation — all 11 tasks complete, 195 tests pass

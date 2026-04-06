@@ -1,5 +1,5 @@
 # generated: 2026-04-05
-# last_updated: 2026-04-07 (epic-5 done, sprint 3 status synced)
+# last_updated: 2026-04-07 (compressed sprint plan — deferred 6-2, 6-3, 6-4 post-submission)
 # project: Solarix
 # project_key: NOKEY
 # tracking_system: file-system
@@ -22,6 +22,7 @@
 #   - in-progress: Developer actively working on implementation
 #   - review: Ready for code review (via Dev's code-review workflow)
 #   - done: Story completed
+#   - deferred: Moved to post-submission backlog
 #
 # Retrospective Status:
 #   - optional: Can be completed but not required
@@ -41,8 +42,14 @@
 # Stories within a track are sequential. Tracks within a sprint are parallel.
 # Sprint N+1 begins only after all Sprint N tracks merge to main.
 #
+# COMPRESSED PLAN (bounty deadline):
+# ==================================
+# Stories 6-2, 6-3, 6-4 deferred to post-submission.
+# All other stories kept at full scope (no simplification).
+# Sprints 5+6 compressed: tracing (6-1) + docs/demo (7-1, 7-2) run as final sprint.
+#
 # CRITICAL PATH (longest chain):
-#   1.1 → 1.2 → 1.3 → 2.1 → 2.2 → 2.3 → 3.4 → 3.5 → 4.1 → 4.2 → 4.3 → 7.1 → 7.2
+#   1.1 → 1.2 → 1.3 → 2.1 → 2.2 → 2.3 → 3.4 → 3.5 → 4.1 → 4.2 → 4.3 → 7.1
 #
 # MERGE STRATEGY:
 #   After each sprint, all worktree branches merge to main before next sprint starts.
@@ -57,13 +64,7 @@ story_location: _bmad-output/implementation-artifacts
 
 development_status:
   # ============================================================================
-  # SPRINT 1: Foundation (sequential — no parallelism, everything depends on this)
-  # ============================================================================
-  # Single track. Sets up project structure, DB, Docker, health endpoint.
-  # All subsequent sprints depend on Sprint 1 being fully merged to main.
-  #
-  # Track A: epic-1 stories in sequence
-  # Estimated: 3 stories, 1 worktree
+  # SPRINT 1: Foundation (DONE)
   # ============================================================================
 
   epic-1: done
@@ -73,15 +74,7 @@ development_status:
   epic-1-retrospective: optional
 
   # ============================================================================
-  # SPRINT 2: Core Modules (3 parallel worktrees)
-  # ============================================================================
-  # After Epic 1 merges, three independent modules can be built simultaneously.
-  # Each track touches different files/modules with no overlap.
-  #
-  # Track A: IDL subsystem        → src/idl/
-  # Track B: Decoder subsystem    → src/decoder/, src/types.rs
-  # Track C: RPC client           → src/pipeline/rpc.rs
-  # Estimated: 5 stories across 3 worktrees
+  # SPRINT 2: Core Modules (DONE)
   # ============================================================================
 
   epic-2: done
@@ -97,13 +90,6 @@ development_status:
 
   # ============================================================================
   # SPRINT 3: Storage + API Foundation (2 parallel worktrees)
-  # ============================================================================
-  # After Sprint 2 merges, the storage writer needs schema (2.3) + decoder (3.1/3.2)
-  # + RPC (3.3). Meanwhile, API endpoints need ProgramRegistry (2.2) + axum (1.3).
-  #
-  # Track A: Storage writer + pipeline orchestrator → src/storage/writer.rs, src/pipeline/mod.rs
-  # Track B: API program endpoints + query builder  → src/api/, src/storage/queries.rs
-  # Estimated: 4 stories across 2 worktrees
   # ============================================================================
 
   tech-debt-sweep-sprint-2-3: done # Track B | deps: none | files: rpc.rs, handlers.rs, idl/mod.rs, registry.rs, decoder/mod.rs, config.rs | P1+P2 fixes from done stories
@@ -133,44 +119,40 @@ development_status:
   4-2-streaming-pipeline-and-gap-detection: backlog # Track A | deps: 4.1, 3.5 | files: src/pipeline/mod.rs
   4-3-cold-start-and-graceful-shutdown: backlog # Track A | deps: 4.2 | files: src/pipeline/mod.rs, src/main.rs
 
-  5-3-instruction-and-account-query-endpoints: ready-for-dev # Track B | deps: 5.2, 3.4 | files: src/api/handlers.rs
+  5-3-instruction-and-account-query-endpoints: review # Track B | deps: 5.2, 3.4 | files: src/api/handlers.rs
   5-4-aggregation-statistics-and-health-enhancement: backlog # Track B | deps: 5.3 | files: src/api/handlers.rs
 
   epic-4-retrospective: optional
   epic-5-retrospective: optional
 
   # ============================================================================
-  # SPRINT 5: Hardening & Tests (3 parallel worktrees)
+  # SPRINT 5: Tracing + Documentation & Demo (2 parallel worktrees)
   # ============================================================================
-  # After Sprint 4 merges, testing and observability are independent of each other.
-  # Tracing can be woven across all modules. Unit tests and integration tests
-  # touch different files.
+  # Compressed from original Sprints 5+6. Tracing is cross-cutting but doesn't
+  # conflict with docs. Run in parallel to save time.
   #
-  # Track A: Structured tracing   → spans + logging across all modules
-  # Track B: Unit/property tests  → tests/decode_roundtrip.rs, tests/schema_generation.rs
-  # Track C: Integration + API tests → tests/pipeline_integration.rs, tests/api_integration.rs
-  # Estimated: 4 stories across 3 worktrees
+  # Track A: Structured tracing   → spans + JSON logging across all modules
+  # Track B: README + demo script → README.md, docs/, demo
+  # Estimated: 3 stories across 2 worktrees
   # ============================================================================
 
   epic-6: backlog
   6-1-structured-tracing-and-observability: backlog # Track A | deps: 1.1 (but best after 4.x) | files: across all modules
-  6-2-core-module-tests: backlog # Track B | deps: 3.1, 2.3 | files: tests/
-  6-3-integration-and-api-tests: backlog # Track C | deps: 5.x, 3.5 | files: tests/
-  6-4-ci-pipeline: backlog # Sequential after A+B+C merge | files: .github/
-
-  epic-6-retrospective: optional
-
-  # ============================================================================
-  # SPRINT 6: Documentation & Demo (sequential)
-  # ============================================================================
-  # Final polish. README needs the full system working. Demo script validates
-  # the entire flow end-to-end. No parallelism — these are holistic tasks.
-  #
-  # Track A: Documentation and demo
-  # Estimated: 2 stories, 1 worktree
-  # ============================================================================
 
   epic-7: backlog
-  7-1-readme-and-architecture-documentation: backlog # Track A | deps: all epics | files: README.md, docs/
-  7-2-demo-script-and-bounty-submission-polish: backlog # Track A | deps: 7.1 | files: demo.sh, README.md, src/**
+  7-1-readme-and-architecture-documentation: backlog # Track B | deps: all epics | files: README.md, docs/
+  7-2-demo-script-and-bounty-submission-polish: backlog # Track B | deps: 7.1 | files: demo.sh, README.md, src/**
+
+  epic-6-retrospective: optional
   epic-7-retrospective: optional
+
+  # ============================================================================
+  # POST-SUBMISSION: Deferred stories (after bounty deadline, if time permits)
+  # ============================================================================
+  # These stories provide additional quality assurance but are not required for
+  # a complete bounty submission. All core requirements are covered above.
+  # ============================================================================
+
+  6-2-core-module-tests: deferred # deps: 3.1, 2.3 | files: tests/ | proptest roundtrips, schema gen tests
+  6-3-integration-and-api-tests: deferred # deps: 5.x, 3.5 | files: tests/ | LiteSVM pipeline, axum-test API tests
+  6-4-ci-pipeline: deferred # deps: 6-2, 6-3 | files: .github/ | GitHub Actions CI

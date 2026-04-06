@@ -1,21 +1,28 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anchor_lang_idl_spec::{IdlDefinedFields, IdlField, IdlTypeDef, IdlTypeDefTy};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use tokio::time::timeout;
 use tracing::info;
 
+use crate::api::filters::{
+    parse_filters, resolve_filters, ColumnExpr, FilterContext, FilterOp, ResolvedFilter,
+};
 use crate::idl::IdlManager;
 use crate::registry::ProgramRegistry;
-use crate::storage::schema::quote_ident;
+use crate::storage::queries::{build_query, QueryTarget};
+use crate::storage::schema::{quote_ident, sanitize_identifier};
 
 use super::{ApiError, AppState};
 
@@ -403,6 +410,380 @@ fn hard_delete(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Pagination helpers
+// ---------------------------------------------------------------------------
+
+fn clamp_limit(params: &HashMap<String, String>, config: &crate::config::Config) -> i64 {
+    params
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.clamp(1, config.api_max_page_size as i64))
+        .unwrap_or(config.api_default_page_size as i64)
+}
+
+fn clamp_offset(params: &HashMap<String, String>) -> i64 {
+    params
+        .get("offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.max(0))
+        .unwrap_or(0)
+}
+
+fn encode_cursor(slot: i64, signature: &str) -> String {
+    STANDARD.encode(format!("{slot}_{signature}"))
+}
+
+fn decode_cursor(cursor: &str) -> Result<(i64, String), ApiError> {
+    let decoded = STANDARD
+        .decode(cursor)
+        .map_err(|_| ApiError::InvalidValue("invalid cursor encoding".to_string()))?;
+    let s = String::from_utf8(decoded)
+        .map_err(|_| ApiError::InvalidValue("invalid cursor encoding".to_string()))?;
+    let (slot_str, sig) = s
+        .split_once('_')
+        .ok_or_else(|| ApiError::InvalidValue("invalid cursor format".to_string()))?;
+    let slot = slot_str
+        .parse::<i64>()
+        .map_err(|_| ApiError::InvalidValue("invalid cursor slot".to_string()))?;
+    Ok((slot, sig.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Shared query helpers
+// ---------------------------------------------------------------------------
+
+async fn get_schema_name(pool: &sqlx::PgPool, program_id: &str) -> Result<String, ApiError> {
+    let row = sqlx::query(r#"SELECT "schema_name" FROM "programs" WHERE "program_id" = $1"#)
+        .bind(program_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| ApiError::QueryFailed(e.to_string()))?
+        .ok_or_else(|| ApiError::ProgramNotFound(program_id.to_string()))?;
+    Ok(row.get("schema_name"))
+}
+
+fn get_account_fields(account_name: &str, types: &[IdlTypeDef]) -> Result<Vec<IdlField>, ApiError> {
+    let type_def = types
+        .iter()
+        .find(|t| t.name == account_name)
+        .ok_or_else(|| ApiError::AccountTypeNotFound(account_name.to_string()))?;
+    match &type_def.ty {
+        IdlTypeDefTy::Struct {
+            fields: Some(fields),
+        } => match fields {
+            IdlDefinedFields::Named(named) => Ok(named.clone()),
+            _ => Ok(vec![]),
+        },
+        _ => Ok(vec![]),
+    }
+}
+
+fn instruction_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "signature": row.get::<String, _>("signature"),
+        "slot": row.get::<i64, _>("slot"),
+        "block_time": row.get::<Option<i64>, _>("block_time"),
+        "instruction_name": row.get::<String, _>("instruction_name"),
+        "args": row.get::<Value, _>("args"),
+        "accounts": row.get::<Value, _>("accounts"),
+        "data": row.get::<Value, _>("data"),
+    })
+}
+
+fn account_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "pubkey": row.get::<String, _>("pubkey"),
+        "slot_updated": row.get::<i64, _>("slot_updated"),
+        "lamports": row.get::<i64, _>("lamports"),
+        "data": row.get::<Value, _>("data"),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Instruction & Account query handlers
+// ---------------------------------------------------------------------------
+
+pub async fn list_instruction_types(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
+    let names: Vec<String> = {
+        let registry = state.registry.read().await;
+        let idl = registry
+            .get_idl(&id)
+            .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
+        idl.instructions.iter().map(|i| i.name.clone()).collect()
+    };
+    let total = names.len();
+
+    Ok(Json(json!({
+        "data": names,
+        "meta": { "program_id": id, "total": total }
+    })))
+}
+
+pub async fn query_instructions(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
+    // Get IDL data, drop lock before await
+    let (instruction_args, types) = {
+        let registry = state.registry.read().await;
+        let idl = registry
+            .get_idl(&id)
+            .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
+        let instruction = idl
+            .instructions
+            .iter()
+            .find(|i| i.name == name)
+            .ok_or_else(|| ApiError::InstructionNotFound(name.clone()))?;
+        (instruction.args.clone(), idl.types.clone())
+    };
+
+    let limit = clamp_limit(&params, &state.config);
+    let cursor_param = params.get("cursor").cloned();
+
+    // Parse and resolve filters
+    let parsed = parse_filters(&params);
+    let mut resolved = resolve_filters(
+        &parsed,
+        &instruction_args,
+        &types,
+        FilterContext::Instructions,
+    )?;
+
+    // Inject instruction_name filter
+    resolved.push(ResolvedFilter {
+        column_expr: ColumnExpr::Promoted {
+            column: "instruction_name".to_string(),
+        },
+        op: FilterOp::Eq,
+        value: name.clone(),
+    });
+
+    let schema_name = get_schema_name(&state.pool, &id).await?;
+    let target = QueryTarget::Instructions {
+        schema: schema_name,
+    };
+
+    // Build query, fetch limit + 1 for has_more detection
+    let fetch_limit = limit + 1;
+    let mut qb = build_query(&target, &resolved, fetch_limit, 0);
+
+    // Inject cursor condition if present
+    // Cursor is (slot, signature) DESC order: WHERE (slot, signature) < (cursor_slot, cursor_sig)
+    // Since build_query already emits WHERE if filters exist, we need to append AND
+    if let Some(ref cursor) = cursor_param {
+        let (cursor_slot, cursor_sig) = decode_cursor(cursor)?;
+        // The query already has WHERE clause from instruction_name filter
+        qb.push(" AND (");
+        qb.push(r#""slot" < "#);
+        qb.push_bind(cursor_slot);
+        qb.push(r#" OR ("slot" = "#);
+        qb.push_bind(cursor_slot);
+        qb.push(r#" AND "signature" < "#);
+        qb.push_bind(cursor_sig);
+        qb.push("))");
+    }
+
+    let start = std::time::Instant::now();
+    let rows = qb
+        .build()
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| ApiError::QueryFailed(e.to_string()))?;
+    let query_time_ms = start.elapsed().as_millis() as u64;
+
+    let has_more = rows.len() as i64 > limit;
+    let result_rows = if has_more {
+        &rows[..limit as usize]
+    } else {
+        &rows[..]
+    };
+
+    let data: Vec<Value> = result_rows.iter().map(instruction_row_to_json).collect();
+
+    let next_cursor = if has_more {
+        let last = &result_rows[result_rows.len() - 1];
+        let last_slot: i64 = last.get("slot");
+        let last_sig: String = last.get("signature");
+        Some(encode_cursor(last_slot, &last_sig))
+    } else {
+        None
+    };
+
+    Ok(Json(json!({
+        "data": data,
+        "pagination": {
+            "limit": limit,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        },
+        "meta": {
+            "program_id": id,
+            "instruction": name,
+            "query_time_ms": query_time_ms,
+        }
+    })))
+}
+
+pub async fn list_account_types(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
+    let names: Vec<String> = {
+        let registry = state.registry.read().await;
+        let idl = registry
+            .get_idl(&id)
+            .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
+        idl.accounts.iter().map(|a| a.name.clone()).collect()
+    };
+    let total = names.len();
+
+    Ok(Json(json!({
+        "data": names,
+        "meta": { "program_id": id, "total": total }
+    })))
+}
+
+pub async fn query_accounts(
+    State(state): State<Arc<AppState>>,
+    Path((id, account_type)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
+    // Get IDL data, drop lock before await
+    let (account_fields, types) = {
+        let registry = state.registry.read().await;
+        let idl = registry
+            .get_idl(&id)
+            .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
+
+        // Validate account type exists in IDL
+        if !idl.accounts.iter().any(|a| a.name == account_type) {
+            return Err(ApiError::AccountTypeNotFound(account_type.clone()));
+        }
+
+        let types = idl.types.clone();
+        let fields = get_account_fields(&account_type, &types)?;
+        (fields, types)
+    };
+
+    let limit = clamp_limit(&params, &state.config);
+    let offset = clamp_offset(&params);
+
+    // Parse and resolve filters
+    let parsed = parse_filters(&params);
+    let resolved = resolve_filters(&parsed, &account_fields, &types, FilterContext::Accounts)?;
+
+    let schema_name = get_schema_name(&state.pool, &id).await?;
+    let table_name = sanitize_identifier(&account_type);
+    let target = QueryTarget::Accounts {
+        schema: schema_name.clone(),
+        table: table_name.clone(),
+    };
+
+    // Fetch limit + 1 for has_more detection
+    let fetch_limit = limit + 1;
+    let mut qb = build_query(&target, &resolved, fetch_limit, offset);
+
+    // Count query (unfiltered total for this account type)
+    let count_sql = format!(
+        "SELECT COUNT(*) as count FROM {}.{}",
+        quote_ident(&schema_name),
+        quote_ident(&table_name)
+    );
+
+    let start = std::time::Instant::now();
+    let (rows, total) = tokio::try_join!(
+        async {
+            qb.build()
+                .fetch_all(&state.pool)
+                .await
+                .map_err(|e| ApiError::QueryFailed(e.to_string()))
+        },
+        async {
+            let row = sqlx::query(&count_sql)
+                .fetch_one(&state.pool)
+                .await
+                .map_err(|e| ApiError::QueryFailed(e.to_string()))?;
+            Ok::<i64, ApiError>(row.get("count"))
+        }
+    )?;
+    let query_time_ms = start.elapsed().as_millis() as u64;
+
+    let has_more = rows.len() as i64 > limit;
+    let result_rows = if has_more {
+        &rows[..limit as usize]
+    } else {
+        &rows[..]
+    };
+
+    let data: Vec<Value> = result_rows.iter().map(account_row_to_json).collect();
+
+    Ok(Json(json!({
+        "data": data,
+        "pagination": {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+        },
+        "meta": {
+            "program_id": id,
+            "account_type": account_type,
+            "query_time_ms": query_time_ms,
+        }
+    })))
+}
+
+pub async fn get_account(
+    State(state): State<Arc<AppState>>,
+    Path((id, account_type, pubkey)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
+    // Validate account type exists in IDL
+    {
+        let registry = state.registry.read().await;
+        let idl = registry
+            .get_idl(&id)
+            .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
+        if !idl.accounts.iter().any(|a| a.name == account_type) {
+            return Err(ApiError::AccountTypeNotFound(account_type.clone()));
+        }
+    }
+
+    let schema_name = get_schema_name(&state.pool, &id).await?;
+    let table_name = sanitize_identifier(&account_type);
+
+    let sql = format!(
+        "SELECT * FROM {}.{} WHERE {} = $1",
+        quote_ident(&schema_name),
+        quote_ident(&table_name),
+        quote_ident("pubkey"),
+    );
+
+    let row = sqlx::query(&sql)
+        .bind(&pubkey)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| ApiError::QueryFailed(e.to_string()))?
+        .ok_or_else(|| ApiError::AccountNotFound(pubkey.clone()))?;
+
+    let data = account_row_to_json(&row);
+    Ok(Json(json!({ "data": data })))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -541,5 +922,216 @@ mod tests {
     fn validate_program_id_rejects_wrong_length() {
         // Too short — valid base58 but not 32 bytes
         assert!(validate_program_id("abc").is_err());
+    }
+
+    // --- Story 5.3: Pagination helpers ---
+
+    fn make_config() -> crate::config::Config {
+        crate::config::Config {
+            rpc_url: String::new(),
+            ws_url: None,
+            database_url: String::new(),
+            db_pool_min: 2,
+            db_pool_max: 10,
+            rpc_rps: 10,
+            backfill_chunk_size: 50_000,
+            start_slot: None,
+            end_slot: None,
+            index_failed_txs: false,
+            api_host: String::new(),
+            api_port: 3000,
+            api_default_page_size: 50,
+            api_max_page_size: 1000,
+            channel_capacity: 256,
+            checkpoint_interval_secs: 10,
+            retry_initial_ms: 500,
+            retry_max_ms: 30_000,
+            retry_timeout_secs: 300,
+            log_level: String::new(),
+            log_format: String::new(),
+        }
+    }
+
+    #[test]
+    fn clamp_limit_default() {
+        let config = make_config();
+        let params = HashMap::new();
+        assert_eq!(clamp_limit(&params, &config), 50);
+    }
+
+    #[test]
+    fn clamp_limit_valid_value() {
+        let config = make_config();
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "25".to_string());
+        assert_eq!(clamp_limit(&params, &config), 25);
+    }
+
+    #[test]
+    fn clamp_limit_over_max_clamped() {
+        let config = make_config();
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "5000".to_string());
+        assert_eq!(clamp_limit(&params, &config), 1000);
+    }
+
+    #[test]
+    fn clamp_limit_negative_uses_default() {
+        let config = make_config();
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "-5".to_string());
+        // -5 clamped to 1 (minimum)
+        assert_eq!(clamp_limit(&params, &config), 1);
+    }
+
+    #[test]
+    fn clamp_limit_zero_clamped_to_one() {
+        let config = make_config();
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "0".to_string());
+        assert_eq!(clamp_limit(&params, &config), 1);
+    }
+
+    #[test]
+    fn clamp_limit_non_numeric_uses_default() {
+        let config = make_config();
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "abc".to_string());
+        assert_eq!(clamp_limit(&params, &config), 50);
+    }
+
+    #[test]
+    fn clamp_offset_default() {
+        let params = HashMap::new();
+        assert_eq!(clamp_offset(&params), 0);
+    }
+
+    #[test]
+    fn clamp_offset_valid_value() {
+        let mut params = HashMap::new();
+        params.insert("offset".to_string(), "100".to_string());
+        assert_eq!(clamp_offset(&params), 100);
+    }
+
+    #[test]
+    fn clamp_offset_negative_clamped_to_zero() {
+        let mut params = HashMap::new();
+        params.insert("offset".to_string(), "-10".to_string());
+        assert_eq!(clamp_offset(&params), 0);
+    }
+
+    #[test]
+    fn clamp_offset_non_numeric_uses_default() {
+        let mut params = HashMap::new();
+        params.insert("offset".to_string(), "abc".to_string());
+        assert_eq!(clamp_offset(&params), 0);
+    }
+
+    // --- Cursor encode/decode ---
+
+    #[test]
+    fn cursor_encode_decode_roundtrip() {
+        let slot = 123456_i64;
+        let sig = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8";
+        let encoded = encode_cursor(slot, sig);
+        let (decoded_slot, decoded_sig) = decode_cursor(&encoded).unwrap();
+        assert_eq!(decoded_slot, slot);
+        assert_eq!(decoded_sig, sig);
+    }
+
+    #[test]
+    fn cursor_decode_invalid_base64() {
+        let result = decode_cursor("not-valid-base64!!!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cursor_decode_missing_separator() {
+        let encoded = STANDARD.encode("nounderscore");
+        let result = decode_cursor(&encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cursor_decode_non_numeric_slot() {
+        let encoded = STANDARD.encode("abc_sig123");
+        let result = decode_cursor(&encoded);
+        assert!(result.is_err());
+    }
+
+    // --- New ApiError variants ---
+
+    #[tokio::test]
+    async fn api_error_instruction_not_found_returns_404() {
+        let err = ApiError::InstructionNotFound("swap".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "INSTRUCTION_NOT_FOUND");
+        assert!(body["error"]["message"].as_str().unwrap().contains("swap"));
+    }
+
+    #[tokio::test]
+    async fn api_error_account_type_not_found_returns_404() {
+        let err = ApiError::AccountTypeNotFound("Vault".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "ACCOUNT_TYPE_NOT_FOUND");
+        assert!(body["error"]["message"].as_str().unwrap().contains("Vault"));
+    }
+
+    #[tokio::test]
+    async fn api_error_account_not_found_returns_404() {
+        let err = ApiError::AccountNotFound("ABC123pubkey".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "ACCOUNT_NOT_FOUND");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ABC123pubkey"));
+    }
+
+    // --- get_account_fields helper ---
+
+    #[test]
+    fn get_account_fields_extracts_named_struct_fields() {
+        use anchor_lang_idl_spec::{IdlDefinedFields, IdlField, IdlType, IdlTypeDef, IdlTypeDefTy};
+
+        let types = vec![IdlTypeDef {
+            name: "TokenAccount".to_string(),
+            docs: vec![],
+            serialization: anchor_lang_idl_spec::IdlSerialization::default(),
+            repr: None,
+            generics: vec![],
+            ty: IdlTypeDefTy::Struct {
+                fields: Some(IdlDefinedFields::Named(vec![
+                    IdlField {
+                        name: "owner".to_string(),
+                        docs: vec![],
+                        ty: IdlType::Pubkey,
+                    },
+                    IdlField {
+                        name: "amount".to_string(),
+                        docs: vec![],
+                        ty: IdlType::U64,
+                    },
+                ])),
+            },
+        }];
+
+        let fields = get_account_fields("TokenAccount", &types).unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "owner");
+        assert_eq!(fields[1].name, "amount");
+    }
+
+    #[test]
+    fn get_account_fields_returns_error_for_unknown_type() {
+        let types = vec![];
+        let result = get_account_fields("Nonexistent", &types);
+        assert!(result.is_err());
     }
 }

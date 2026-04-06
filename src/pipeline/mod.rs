@@ -310,10 +310,14 @@ impl PipelineOrchestrator {
             }
         }
 
-        // Update indexer_state to idle on success
+        // Update indexer_state based on outcome
         if backfill_result.is_ok() && !self.cancel.is_cancelled() {
             update_indexer_state(&self.pool, program_id, "idle", Some(end_slot)).await?;
             info!(program_id, start_slot, end_slot, "backfill complete");
+        } else if backfill_result.is_err() {
+            if let Err(e) = update_indexer_state(&self.pool, program_id, "failed", None).await {
+                warn!(error = %e, "failed to set indexer_state to failed");
+            }
         }
 
         backfill_result
@@ -551,17 +555,11 @@ impl PipelineOrchestrator {
             );
         }
 
-        // Write accounts in batches
-        if !decoded_accounts.is_empty() {
+        // Write accounts in batches to avoid unbounded memory for large programs
+        const ACCOUNT_WRITE_BATCH: usize = 1000;
+        for batch in decoded_accounts.chunks(ACCOUNT_WRITE_BATCH) {
             self.writer
-                .write_block(
-                    schema_name,
-                    "accounts",
-                    &[],
-                    &decoded_accounts,
-                    current_slot,
-                    None,
-                )
+                .write_block(schema_name, "accounts", &[], batch, current_slot, None)
                 .await?;
         }
 
@@ -616,9 +614,9 @@ async fn writer_task(
                 }
             }
             _ = cancel.cancelled() => {
-                // Drain remaining items from channel
+                // Drain remaining items from channel — log errors but continue
                 while let Ok(batch) = rx.try_recv() {
-                    let result = writer
+                    match writer
                         .write_block(
                             &batch.schema_name,
                             &batch.stream,
@@ -627,10 +625,16 @@ async fn writer_task(
                             batch.slot,
                             batch.signature.as_deref(),
                         )
-                        .await?;
-
-                    total_instructions += result.instructions_written;
-                    total_accounts += result.accounts_written;
+                        .await
+                    {
+                        Ok(result) => {
+                            total_instructions += result.instructions_written;
+                            total_accounts += result.accounts_written;
+                        }
+                        Err(e) => {
+                            warn!(slot = batch.slot, error = %e, "drain write failed, continuing");
+                        }
+                    }
                 }
                 break;
             }

@@ -51,6 +51,15 @@ pub enum ApiError {
     #[error("invalid value: {0}")]
     InvalidValue(String),
 
+    #[error("instruction not found: {0}")]
+    InstructionNotFound(String),
+
+    #[error("account type not found: {0}")]
+    AccountTypeNotFound(String),
+
+    #[error("account not found: {0}")]
+    AccountNotFound(String),
+
     #[error("storage error: {0}")]
     StorageError(String),
 }
@@ -85,6 +94,21 @@ impl IntoResponse for ApiError {
                 (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())
             }
             ApiError::InvalidValue(msg) => (StatusCode::BAD_REQUEST, "INVALID_VALUE", msg.clone()),
+            ApiError::InstructionNotFound(name) => (
+                StatusCode::NOT_FOUND,
+                "INSTRUCTION_NOT_FOUND",
+                format!("Instruction '{name}' not found in IDL"),
+            ),
+            ApiError::AccountTypeNotFound(name) => (
+                StatusCode::NOT_FOUND,
+                "ACCOUNT_TYPE_NOT_FOUND",
+                format!("Account type '{name}' not found in IDL"),
+            ),
+            ApiError::AccountNotFound(key) => (
+                StatusCode::NOT_FOUND,
+                "ACCOUNT_NOT_FOUND",
+                format!("Account '{key}' not found"),
+            ),
             ApiError::IdlError(msg) => (StatusCode::UNPROCESSABLE_ENTITY, "IDL_ERROR", msg.clone()),
             ApiError::StorageError(msg) => {
                 error!(error = %msg, "storage error in API handler");
@@ -135,7 +159,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/{id}",
             get(handlers::get_program).delete(handlers::delete_program),
-        );
+        )
+        .route("/{id}/instructions", get(handlers::list_instruction_types))
+        .route(
+            "/{id}/instructions/{name}",
+            get(handlers::query_instructions),
+        )
+        .route("/{id}/accounts", get(handlers::list_account_types))
+        .route("/{id}/accounts/{type}", get(handlers::query_accounts))
+        .route("/{id}/accounts/{type}/{pubkey}", get(handlers::get_account));
 
     Router::new()
         .nest("/api/programs", program_routes)

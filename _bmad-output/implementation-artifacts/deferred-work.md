@@ -113,3 +113,9 @@ these as known technical debt; stories still in-progress have blocking items not
 - **Unbounded `Vec` accumulation in `get_blocks` for huge ranges** — `src/pipeline/rpc.rs:347`. Calling `get_blocks(0, 300_000_000)` accumulates ~150M u64 entries (~1.2 GB). Pipeline orchestrator will enforce `backfill_chunk_size` when implemented (Story 3-5). Add a max-range guard or streaming mechanism.
 - **`is_retryable()` includes `Idl(FetchFailed)` beyond AC8 spec** — `src/pipeline/mod.rs:49`. AC8 specifies exactly 3 retryable variants (RpcFailed, WebSocketDisconnect, RateLimited). Code also retries `IdlError::FetchFailed`. Reasonable behavior but not in spec. Added by story 2-1.
 - **`tx_encoding` config field unused by RpcClient** — `src/config.rs:54-55`. Config defines `SOLARIX_TX_ENCODING` (default "base64") but RpcClient hardcodes `encoding: "json"`. Dead config field could mislead operators. Either remove or wire through.
+
+## Deferred from: code review of 3-5-batch-indexing-pipeline-orchestrator (2026-04-06)
+
+- **Non-atomic slot+accounts fetch in `run_account_snapshot`** — `src/pipeline/mod.rs:513-515`. `get_slot()` and `get_multiple_accounts()` called separately; accounts may be at newer slot than recorded `current_slot`. Fundamental RPC limitation, no fix without major redesign.
+- **`u64 as i64` cast in `update_indexer_state` without overflow guard** — `src/pipeline/mod.rs:735`. Solana slots ~300M, well within i64::MAX. `safe_u64_to_i64()` exists in `writer.rs` but is unused. Consistency concern only; revisit if Solana slots approach i64::MAX.
+- **`process_chunk` skips failed blocks without skip counter** — `src/pipeline/mod.rs:348-351`. Story spec says "increment skip counter" but no counter exists. Gap detection is story 4.2 scope; skip counter can be added there.
