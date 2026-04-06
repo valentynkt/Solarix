@@ -76,3 +76,18 @@ these as known technical debt; stories still in-progress have blocking items not
 - **`DROP SCHEMA` in `delete_program` uses string interpolation instead of `quote_ident()`** — `src/api/handlers.rs:173` builds DDL with `format!()` instead of using the `quote_ident()` function from `schema.rs`. Low risk since `schema_name` comes from the DB (sanitized at creation), but should use `quote_ident()` for defense in depth. Fix in Story 5.1.
 - **TOCTOU race in `write_registration` at default isolation level** — `src/registry.rs:186-209` uses SELECT EXISTS + INSERT inside a transaction with READ COMMITTED. Two concurrent transactions could both see `EXISTS = false`. Currently mitigated by `Arc<RwLock>`, but Story 5.1 plans to relax the lock scope — must add a UNIQUE constraint guard or serializable isolation when that happens.
 - **Build error in `src/api/handlers.rs`** — The `register_program` handler stub has a `!Send` issue with `RwLockWriteGuard` across an `.await` point. Blocks `cargo test --lib`. Fix in Story 5.1 handler implementation.
+
+## Deferred from: code review of 5-1-program-management-endpoints (2026-04-06)
+
+- **TOCTOU race in `write_registration` duplicate check** — `src/registry.rs:267-277`. SELECT EXISTS + INSERT at READ COMMITTED isolation. Concurrent registrations could both see `exists = false`. PK constraint catches it but returns `DatabaseError` instead of `AlreadyRegistered`. Fix: use INSERT ON CONFLICT or SERIALIZABLE isolation.
+- **`list_programs` has no pagination** — `src/api/handlers.rs:157`. `fetch_all` loads every row. Config already has `api_default_page_size` / `api_max_page_size`. Add pagination in story 5.2+ (query builder).
+- **Excessive cloning in `commit_registration`** — `src/registry.rs:133-158`. `Idl` struct cloned 2x (for `generate_schema` and `seed_metadata`). Last usage can consume `data` by move. Performance optimization.
+- **Integration test doesn't clean up created PG schemas** — `tests/registration_test.rs:38-48`. Cleanup only deletes DB rows, doesn't `DROP SCHEMA ... CASCADE`. Leaves orphaned schemas on repeated runs.
+- **No request body size limit on IDL upload** — `src/api/mod.rs` router has no `DefaultBodyLimit`. A large POST body could exhaust server memory. Add body limit in hardening sprint (Epic 6).
+- **Hard delete doesn't check for active indexing pipeline** — `src/api/handlers.rs:241`. No status guard before DROP SCHEMA. Pipeline (story 3.5) doesn't exist yet; add guard when pipeline is implemented.
+
+## Deferred from: code review of 3-3-rpc-block-source-and-rate-limited-fetching (2026-04-06, second pass)
+
+- **Unbounded `Vec` accumulation in `get_blocks` for huge ranges** — `src/pipeline/rpc.rs:347`. Calling `get_blocks(0, 300_000_000)` accumulates ~150M u64 entries (~1.2 GB). Pipeline orchestrator will enforce `backfill_chunk_size` when implemented (Story 3-5). Add a max-range guard or streaming mechanism.
+- **`is_retryable()` includes `Idl(FetchFailed)` beyond AC8 spec** — `src/pipeline/mod.rs:49`. AC8 specifies exactly 3 retryable variants (RpcFailed, WebSocketDisconnect, RateLimited). Code also retries `IdlError::FetchFailed`. Reasonable behavior but not in spec. Added by story 2-1.
+- **`tx_encoding` config field unused by RpcClient** — `src/config.rs:54-55`. Config defines `SOLARIX_TX_ENCODING` (default "base64") but RpcClient hardcodes `encoding: "json"`. Dead config field could mislead operators. Either remove or wire through.

@@ -440,6 +440,14 @@ impl AccountSource for RpcClient {
                     ))
                 })?;
 
+            if result.value.len() > batch_keys.len() {
+                return Err(PipelineError::RpcFailed(format!(
+                    "getMultipleAccounts returned {} entries for {} keys",
+                    result.value.len(),
+                    batch_keys.len(),
+                )));
+            }
+
             for (i, maybe_account) in result.value.into_iter().enumerate() {
                 if let Some(raw) = maybe_account {
                     let data = decode_base64_account_data(&raw.data)?;

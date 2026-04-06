@@ -89,7 +89,7 @@ development_status:
   2-2-manual-idl-upload-and-program-registration: in-progress # Track A | deps: 2.1 | files: src/idl/, src/types.rs, src/registry.rs, src/api/ | BLOCKED: P0 compile error (missing SchemaFailed arm), P1 test fixes needed — see deferred-work.md
   2-3-dynamic-schema-generation: in-progress # Track A | deps: 2.2 | files: src/storage/schema.rs
 
-  epic-3: in-progress
+  epic-3: done
   3-1-solarixdecoder-trait-and-instruction-decoding: done # Track B | deps: 1.1 | files: src/decoder/ | NOTE: P2 f32/f64 NaN fix, P3 test gaps — see deferred-work.md
   3-2-account-state-decoding: done # Track B | deps: 3.1 | files: src/decoder/ | NOTE: P3 stale test names, missing edge case tests — see deferred-work.md
 
@@ -110,7 +110,7 @@ development_status:
   3-5-batch-indexing-pipeline-orchestrator: backlog # Track A | deps: 3.3, 3.4 | files: src/pipeline/mod.rs
 
   epic-5: in-progress
-  5-1-program-management-endpoints: in-progress # Track B | deps: 2.2, 1.3 | files: src/api/
+  5-1-program-management-endpoints: review # Track B | deps: 2.2, 1.3 | files: src/api/
   5-2-dynamic-query-builder-and-filters: ready-for-dev # Track B | deps: 2.3 | files: src/api/filters.rs, src/storage/queries.rs
 
   epic-2-retrospective: optional

@@ -109,6 +109,26 @@ so that I can manage which programs are indexed without touching the database di
   - [x]`cargo fmt -- --check` passes
   - [x]`cargo test` passes all unit tests
 
+### Review Findings
+
+- [ ] [Review][Decision] #1 Auto-fetch path not implemented (AC2) — `POST /api/programs` with no IDL body returns IDL_ERROR 422 instead of triggering on-chain -> bundled fetch cascade. Infrastructure exists (`fetch_idl_standalone`, `IdlFetchParams`) but is never called from the handler. [src/registry.rs:92] [src/api/handlers.rs:82]
+- [ ] [Review][Decision] #2 Response status is "schema_created" not "registered" (AC2) — API returns `program_info.status` which is updated to `"schema_created"` after schema gen. AC2 specifies `"status": "registered"`. [src/api/handlers.rs:116] [src/registry.rs:175]
+- [ ] [Review][Patch] #3 `DROP SCHEMA` uses `format!` instead of `quote_ident()` [src/api/handlers.rs:251]
+- [ ] [Review][Patch] #4 `seed_metadata` uses SQL string interpolation instead of parameterized queries [src/storage/schema.rs:417-427]
+- [ ] [Review][Patch] #5 No `program_id` validation — accepts empty strings, non-base58, arbitrary length [src/api/handlers.rs:73]
+- [ ] [Review][Patch] #6 Hard delete not transactional — DROP SCHEMA + DELETE indexer_state + DELETE programs are separate statements [src/api/handlers.rs:251-267]
+- [ ] [Review][Patch] #8 Soft delete missing `updated_at = NOW()` [src/api/handlers.rs:284]
+- [ ] [Review][Patch] #9 `generate_schema` doc comment claims transaction but uses pool-direct execution [src/storage/schema.rs:352-354]
+- [ ] [Review][Patch] #10 Double-lookup in `get_idl` (contains_key + index) with stale P10 TODO [src/idl/mod.rs:77-79]
+- [ ] [Review][Patch] #11 `upload_idl` overwrites cache on duplicate re-registration — cache/DB inconsistency [src/idl/mod.rs:153, src/registry.rs:90]
+- [ ] [Review][Patch] #12 `unwrap_or_default()` in `seed_metadata` produces invalid JSONB on failure [src/storage/schema.rs:419]
+- [x] [Review][Defer] #7 TOCTOU race in `write_registration` duplicate check — SELECT EXISTS + INSERT without FOR UPDATE [src/registry.rs:267-277] — deferred, requires SERIALIZABLE isolation or INSERT ON CONFLICT rewrite
+- [x] [Review][Defer] #13 `list_programs` has no pagination [src/api/handlers.rs:157] — deferred, story 5.2+ will add pagination with query builder
+- [x] [Review][Defer] #14 Excessive cloning in `commit_registration` — `Idl` cloned 2x unnecessarily [src/registry.rs:133-158] — deferred, performance optimization
+- [x] [Review][Defer] #15 Integration test doesn't clean up created PG schemas [tests/registration_test.rs:38-48] — deferred, test hygiene
+- [x] [Review][Defer] #16 No request body size limit on IDL upload [src/api/mod.rs:112] — deferred, add DefaultBodyLimit in hardening sprint
+- [x] [Review][Defer] #17 Hard delete doesn't check for active indexing pipeline [src/api/handlers.rs:241] — deferred, pipeline doesn't exist yet (story 3.5)
+
 ## Dev Notes
 
 ### Current Codebase State

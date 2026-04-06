@@ -116,6 +116,13 @@ so that batch indexing respects public RPC limits and recovers gracefully from t
 - [x] [Review][Defer] Empty signatures produce empty-string signature [src/pipeline/rpc.rs:478] — deferred, real blocks always have signatures
 - [x] [Review][Defer] `RawInstruction.data` not `#[serde(default)]` [src/pipeline/rpc.rs:136] — deferred, standard Solana RPC always provides the field
 
+### Review Findings (2026-04-06, second pass)
+
+- [x] [Review][Patch] `get_multiple_accounts` index OOB on malformed RPC response [src/pipeline/rpc.rs:447] — fixed: added bounds check on `result.value.len()` vs `batch_keys.len()`
+- [x] [Review][Defer] Unbounded `Vec` accumulation in `get_blocks` for huge ranges [src/pipeline/rpc.rs:347] — deferred, pipeline orchestrator will enforce chunk size
+- [x] [Review][Defer] `is_retryable()` includes `Idl(FetchFailed)` beyond AC8 spec [src/pipeline/mod.rs:49] — deferred, added by different story, reasonable behavior
+- [x] [Review][Defer] `tx_encoding` config field unused by RpcClient [src/config.rs:54-55] — deferred, dead config cleanup item
+
 ## Dev Notes
 
 ### Codebase State (Stories 1.1 + 1.2 merged, 1.3 in progress)
