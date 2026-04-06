@@ -78,11 +78,11 @@ impl StorageWriter {
             .await
             .map_err(|e| StorageError::WriteFailed(format!("transaction begin failed: {e}")))?;
 
-        let instructions_written = write_instructions(&mut *tx, schema_name, instructions).await?;
+        let instructions_written = write_instructions(&mut tx, schema_name, instructions).await?;
         let accounts_written = self
-            .write_accounts_inner(&mut *tx, schema_name, accounts)
+            .write_accounts_inner(&mut tx, schema_name, accounts)
             .await?;
-        update_checkpoint(&mut *tx, schema_name, stream, slot, signature).await?;
+        update_checkpoint(&mut tx, schema_name, stream, slot, signature).await?;
 
         tx.commit()
             .await
@@ -126,9 +126,18 @@ impl StorageWriter {
                     row.try_get("last_signature").map_err(|e| {
                         StorageError::CheckpointFailed(format!("bad checkpoint data: {e}"))
                     })?;
-                Ok(last_slot.map(|slot| CheckpointInfo {
-                    last_slot: slot as u64,
-                    last_signature,
+                Ok(last_slot.and_then(|slot| {
+                    if slot < 0 {
+                        tracing::warn!(
+                            slot,
+                            "negative slot in checkpoint — treating as no checkpoint"
+                        );
+                        return None;
+                    }
+                    Some(CheckpointInfo {
+                        last_slot: slot as u64,
+                        last_signature,
+                    })
                 }))
             }
             None => Ok(None),
@@ -187,20 +196,27 @@ impl StorageWriter {
         cache_key: &str,
     ) -> Result<Vec<PromotedColumn>, StorageError> {
         // Check cache (brief lock, no await while held)
-        if let Some(cached) = self
-            .promoted_cache
-            .lock()
-            .ok()
-            .and_then(|c| c.get(cache_key).cloned())
-        {
-            return Ok(cached);
+        match self.promoted_cache.lock() {
+            Ok(cache) => {
+                if let Some(cached) = cache.get(cache_key).cloned() {
+                    return Ok(cached);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(%cache_key, "promoted column cache mutex poisoned (read): {e}");
+            }
         }
 
         let columns = discover_promoted_columns(&self.pool, schema_name, table_name).await?;
 
         // Cache result (brief lock, no await while held)
-        if let Ok(mut cache) = self.promoted_cache.lock() {
-            cache.insert(cache_key.to_string(), columns.clone());
+        match self.promoted_cache.lock() {
+            Ok(mut cache) => {
+                cache.insert(cache_key.to_string(), columns.clone());
+            }
+            Err(e) => {
+                tracing::warn!(%cache_key, "promoted column cache mutex poisoned (write): {e}");
+            }
         }
 
         Ok(columns)
@@ -261,6 +277,9 @@ async fn write_accounts_batch(
     promoted: &[PromotedColumn],
 ) -> Result<u64, StorageError> {
     let pubkeys: Vec<&str> = accounts.iter().map(|a| a.pubkey.as_str()).collect();
+    // Safety: Solana slots (~300M current) and single-account lamports (max ~6e17 for
+    // total supply) are well within i64::MAX (9.2e18). Overflow would require >9.2B SOL
+    // in one account, which exceeds total supply. Values are always preserved in JSONB.
     let slots: Vec<i64> = accounts.iter().map(|a| a.slot_updated as i64).collect();
     let lamports: Vec<i64> = accounts.iter().map(|a| a.lamports as i64).collect();
     let data_values: Vec<sqlx::types::Json<serde_json::Value>> = accounts

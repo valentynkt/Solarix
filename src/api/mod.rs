@@ -27,8 +27,11 @@ pub struct AppState {
 /// Errors that can occur in API request handling.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
-    #[error("invalid filter: {0}")]
-    InvalidFilter(String),
+    #[error("invalid filter: {message}")]
+    InvalidFilter {
+        message: String,
+        available_fields: Vec<String>,
+    },
 
     #[error("program not found: {0}")]
     ProgramNotFound(String),
@@ -65,8 +68,18 @@ impl IntoResponse for ApiError {
                 "PROGRAM_ALREADY_REGISTERED",
                 format!("Program '{id}' is already registered"),
             ),
-            ApiError::InvalidFilter(msg) => {
-                (StatusCode::BAD_REQUEST, "INVALID_FILTER", msg.clone())
+            ApiError::InvalidFilter {
+                message,
+                available_fields,
+            } => {
+                let body = json!({
+                    "error": {
+                        "code": "INVALID_FILTER",
+                        "message": message,
+                        "available_fields": available_fields,
+                    }
+                });
+                return (StatusCode::BAD_REQUEST, Json(body)).into_response();
             }
             ApiError::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())

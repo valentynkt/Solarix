@@ -86,6 +86,12 @@ these as known technical debt; stories still in-progress have blocking items not
 - **No request body size limit on IDL upload** — `src/api/mod.rs` router has no `DefaultBodyLimit`. A large POST body could exhaust server memory. Add body limit in hardening sprint (Epic 6).
 - **Hard delete doesn't check for active indexing pipeline** — `src/api/handlers.rs:241`. No status guard before DROP SCHEMA. Pipeline (story 3.5) doesn't exist yet; add guard when pipeline is implemented.
 
+## Deferred from: code review of 3-4-storage-writer-and-atomic-checkpointing (2026-04-06)
+
+- **Promoted column cache never invalidated** — `StorageWriter.promoted_cache` populated once per `(schema, table)` and never cleared. Schema evolution (new IDL version adding columns) requires process restart. Out of scope: "Does NOT handle schema evolution or IDL changes."
+- **No batch size limits for UNNEST arrays** — `write_instructions` and `write_accounts_batch` impose no limit on array size. A pathologically large block could produce oversized SQL. Naturally bounded by Solana consensus block limits in practice.
+- **Integer/smallint promoted column extract lacks overflow guard** — `build_promoted_extract_expr` has CASE WHEN overflow guard for BIGINT but not for INTEGER or SMALLINT casts. If a JSON value exceeds the target type's range, the PostgreSQL cast will raise a runtime error. Depends on `schema.rs` type mapping correctness (u32→BIGINT would avoid this).
+
 ## Deferred from: code review of 2-2 round 2 (2026-04-06)
 
 - **`delete_program` hard-delete is not transactional** — `src/api/handlers.rs:251-267`. DROP SCHEMA, DELETE indexer_state, DELETE programs are three separate statements. Crash after DROP but before DELETEs leaves orphaned rows. Wrap in transaction. **Story 5-1 scope.**
@@ -94,6 +100,13 @@ these as known technical debt; stories still in-progress have blocking items not
 - **`get_program` handler panics on NULL `idl_hash`/`idl_source` columns** — `src/api/handlers.rs:210-211`. `row.get::<String>()` panics if column is NULL. Columns are nullable in schema. Use `Option<String>`. **Story 5-1 scope.**
 - **`register_program` with null IDL and no prior cache doesn't trigger on-chain fetch** — Handler goes directly to `prepare_registration` without calling `fetch_idl_standalone`. Returns opaque "IDL not found" error. **Story 5-1 handler logic.**
 - **Status stuck at `registered` after partial `commit_registration` failure** — If `generate_schema` succeeds but `update_program_status` fails, program row stays at `registered` status forever. No reconciliation mechanism. Future hardening.
+
+## Deferred from: code review of story 5-2 (2026-04-06)
+
+- **No max limit enforcement / negative limit bypasses pagination** — `build_query` accepts any `i64` for limit/offset. `LIMIT -1` in PostgreSQL returns all rows. Handler-level validation needed in story 5.3. [src/storage/queries.rs:21-26]
+- **No value format validation — string on numeric column yields 500** — `slot_gte=abc` passes filter parsing/validation, fails at DB level with unhelpful error. Handler should validate values before calling `build_query`. Story 5.3 scope. [src/api/filters.rs, src/storage/queries.rs]
+- **Fixed columns filterable but not in SELECT** — `instruction_index`, `is_inner_ix`, `is_closed` are in fixed column lists but not in the SELECT column list. Users can filter by these but won't see them in results. Spec inconsistency — needs product decision. [src/storage/queries.rs:30,34]
+- **No tests verifying HTTP error response JSON structure** — Integration tests for `InvalidFilter` error response format are in story 6.3 scope. [src/api/mod.rs]
 
 ## Deferred from: code review of 3-3-rpc-block-source-and-rate-limited-fetching (2026-04-06, second pass)
 

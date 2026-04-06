@@ -1,6 +1,6 @@
 # Story 3.4: Storage Writer & Atomic Checkpointing
 
-Status: review
+Status: done
 
 ## Story
 
@@ -282,17 +282,11 @@ For promoted columns: extract scalar values from `DecodedAccount.data` JSON usin
 
 ### u64 Overflow Guard
 
-```rust
-fn safe_u64_to_i64(value: u64) -> Option<i64> {
-    if value <= i64::MAX as u64 {
-        Some(value as i64)
-    } else {
-        None // Stored as NULL in promoted column, preserved in JSONB as string
-    }
-}
-```
+u64 overflow for promoted columns is handled at the **SQL level** via `CASE WHEN` expressions in the upsert query (see `build_promoted_extract_expr`). Values > i64::MAX produce NULL in the promoted BIGINT column but are always preserved in the JSONB `data` column.
 
-This applies to: `slot_updated`, `lamports`, and any promoted u64 IDL field. The JSONB `data` column always preserves the original value (the decoder already represents u128/u256 as strings, and the pipeline should do the same for overflowing u64).
+A Rust-side utility `safe_u64_to_i64()` exists for potential future use (e.g., Rust-side casting of `slot`/`lamports`) but is currently `#[allow(dead_code)]` since the SQL approach is the single source of truth. Consider removing if it stays unused after story 3.5.
+
+For `slot` and `lamports` common columns: these are cast as `ix.slot as i64` / `account.lamports as i64` directly. Solana slots (~300M currently) and single-account lamports (max ~600B SOL \* 1e9 = 6e17) are well within i64 range. If a future edge case arises, add `safe_u64_to_i64` guards on these casts.
 
 ### Async + Send Safety (Critical)
 
@@ -345,22 +339,13 @@ From `_bmad-output/implementation-artifacts/deferred-work.md`:
 
 ### Promoted Column Writing Strategy
 
-Two viable approaches:
+**Implemented approach:** Promoted columns are populated via SQL-side extraction from the JSONB `data` column within the same UNNEST upsert query. The writer discovers promoted columns by querying `information_schema.columns` for each account table, filtering out the 7 common system columns (`COMMON_ACCOUNT_COLUMNS`). Results are cached per-schema in a `Mutex<HashMap>` on `StorageWriter`.
 
-**Option A (Simple — Recommended for MVP):** Write only common columns + JSONB `data`. Promoted columns are left NULL. The JSONB data column has everything. This unblocks the pipeline immediately. Promoted column population can be added in a follow-up or via a separate batch process.
+**SQL-side extraction pattern:** For each discovered promoted column, the upsert SQL includes an expression like `(data->>'field_name')::BIGINT` in a CTE. u64 overflow is handled at the SQL level with `CASE WHEN (data->>'field')::NUMERIC > 9223372036854775807 THEN NULL ELSE (data->>'field')::BIGINT END`.
 
-**Option B (Full):** For each account type, inspect the IDL to determine which fields are promotable. Extract values from `data` JSON, convert to PG types, and include in the UNNEST vectors. Requires knowing the account type's IDL fields at write time.
+**Column name matching:** DDL creates promoted columns using `sanitize_identifier(field.name)` (lowercased). The decoder outputs JSON with original IDL field names. In practice, Anchor v0.30+ uses snake_case, so `sanitize_identifier` is a no-op for most fields. The `information_schema` query returns the actual DB column names, which match the sanitized versions.
 
-**Decision:** Implement Option B (full promoted columns) since it matches the architecture spec and the DDL already creates the promoted columns. The writer receives `DecodedAccount.data` as a `serde_json::Value` object — extracting scalar fields is straightforward with `data.get("field_name")`.
-
-**How promoted column metadata flows to writer:** The writer needs to know which columns are promoted and their PG types. Two approaches:
-
-- **(Recommended)** Query the `_metadata` table at write time for `account_types` (list of type names), then query `information_schema.columns` for the account table to discover promoted columns. Cache this per-schema in `StorageWriter`.
-- **(Alternative)** Pass the IDL to `StorageWriter` and reuse `map_idl_type_to_pg` to compute promotable fields. This requires coupling writer to IDL types.
-
-**For MVP simplicity:** Start with common columns only (pubkey, slot_updated, lamports, data, updated_at) for the UNNEST INSERT. Promoted columns default to NULL on INSERT and are only populated if the writer has IDL metadata. This unblocks the pipeline immediately. Add promoted column population as a subtask within this story — query `information_schema.columns` to discover non-common columns, then extract matching keys from the JSON `data` field.
-
-**Promoted column name matching:** DDL creates promoted columns using `sanitize_identifier(field.name)` (lowercased). The decoder outputs JSON with the _original_ IDL field names. When extracting promoted values, try both `data.get("fieldName")` (original) and `data.get("fieldname")` (lowercased) to handle both cases. In practice, Anchor v0.30+ IDL field names are already snake_case, so `sanitize_identifier` is a no-op for most fields.
+**Note on `COMMON_ACCOUNT_COLUMNS`:** `writer.rs` hardcodes a list of 7 system columns matching `RESERVED_ACCOUNT_COLUMNS` in `schema.rs`. If the DDL adds/removes a system column, both lists must stay in sync. Consider importing from `schema.rs` in a future cleanup.
 
 For promoted column extraction, build a helper:
 
@@ -401,7 +386,9 @@ All code goes in `src/storage/writer.rs` (replacing the empty stub).
 - Does NOT implement indexer_state updates (story 3.5 — global pipeline status table)
 - Does NOT handle schema evolution or IDL changes
 - Does NOT implement WebSocket/streaming writes (story 4.x)
-- Does NOT handle `write_version` — set to 0 for now (no Geyser source yet)
+- Does NOT handle `write_version` — defaults to 0 (no Geyser source yet)
+- Does NOT update `program_stats` or `indexer_state` counters in the per-block transaction — story 3.5 (orchestrator) or 5.4 (stats) should add counter updates to `write_block` or alongside it
+- Does NOT detect `is_closed` accounts (data length = 0) — column defaults to FALSE; detection deferred to story 4.x or post-MVP
 
 ### Testing Strategy
 
@@ -454,6 +441,10 @@ Integration tests (requiring PostgreSQL) are deferred to Epic 6.
 - `updated_at` DEFAULT NOW() only fires on INSERT; writer must SET explicitly on UPDATE
 - Schema cleanup in tests: add `DROP SCHEMA IF EXISTS ... CASCADE` in integration test teardown
 
+### Tracing Note
+
+Writer functions do not currently use `#[instrument]` spans. Architecture prescribes `#[instrument(skip(self), fields(slot, program_id))]` per pipeline stage. Adding a span on `write_block` is deferred to story 6-1 (structured tracing). For now, `debug!` logs on write completion provide basic observability.
+
 ### Project Structure Notes
 
 - `src/storage/writer.rs` is the designated location per architecture docs
@@ -502,3 +493,23 @@ No blocking issues encountered. Build compiled on first attempt.
 ### File List
 
 - `src/storage/writer.rs` — Rewritten (was empty stub, now full StorageWriter implementation + 24 unit tests)
+
+### Review Findings
+
+- [x] [Review][Patch] `lamports as i64` bare cast without overflow guard — added safety comment explaining why overflow is impossible in practice (max ~6e17 < i64::MAX 9.2e18) [src/storage/writer.rs:265]
+- [x] [Review][Patch] `read_checkpoint` casts `i64` to `u64` without defensive guard — fixed: negative slot now returns None with `warn!` log instead of wrapping to huge u64 [src/storage/writer.rs:129-136]
+- [x] [Review][Patch] Poisoned Mutex silently ignored via `.lock().ok()` — fixed: both read and write paths now log `warn!` on poison, with cache_key context [src/storage/writer.rs:190-204]
+- [x] [Review][Defer] Promoted column cache never invalidated — no refresh on schema evolution. Out of scope per spec ("Does NOT handle schema evolution or IDL changes") — deferred
+- [x] [Review][Defer] No batch size limits for UNNEST arrays — large blocks could produce oversized SQL. Naturally bounded by Solana block limits in practice — deferred
+- [x] [Review][Defer] Integer/smallint promoted extract lacks overflow guard — unlike bigint CASE WHEN guard, ::INTEGER/::SMALLINT casts could fail if JSON value exceeds range — deferred, depends on schema.rs type mapping
+
+### Story Spec Review Findings (2026-04-07)
+
+6 spec improvements applied to story file:
+
+- [x] [Review][Spec] S1: Clarified `program_stats`/`indexer_state` counter updates out of scope — added to "What This Story Does NOT Do"
+- [x] [Review][Spec] S2: Documented `safe_u64_to_i64()` as dead code — u64 overflow handled at SQL level via CASE WHEN
+- [x] [Review][Spec] S3: Consolidated promoted column strategy — removed contradictory Option A/B text, described actual implementation
+- [x] [Review][Spec] N1: Noted `COMMON_ACCOUNT_COLUMNS` duplication with `RESERVED_ACCOUNT_COLUMNS` — sync risk documented
+- [x] [Review][Spec] N2: Noted missing `#[instrument]` tracing spans — deferred to story 6-1
+- [x] [Review][Spec] N3: Noted `is_closed` detection not implemented — deferred to story 4.x

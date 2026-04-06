@@ -81,10 +81,15 @@ fn append_filter_clause(qb: &mut QueryBuilder<'_, Postgres>, filter: &ResolvedFi
                 .value
                 .split(',')
                 .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
                 .collect();
-            qb.push(format!("{} = ANY(", quote_ident(column)));
-            qb.push_bind(values);
-            qb.push(")");
+            if values.is_empty() {
+                qb.push("FALSE");
+            } else {
+                qb.push(format!("{} = ANY(", quote_ident(column)));
+                qb.push_bind(values);
+                qb.push(")");
+            }
         }
 
         // --- Promoted column: standard comparison ---
@@ -93,42 +98,37 @@ fn append_filter_clause(qb: &mut QueryBuilder<'_, Postgres>, filter: &ResolvedFi
             qb.push_bind(filter.value.clone());
         }
 
-        // --- JSONB field: _eq uses @> containment (GIN-optimized) ---
-        (ColumnExpr::Jsonb { field }, FilterOp::Eq) => {
+        // --- JSONB field: _eq / _contains use @> containment (GIN-optimized) ---
+        (ColumnExpr::Jsonb { field }, FilterOp::Eq | FilterOp::Contains) => {
             qb.push(r#""data" @> "#);
             let mut obj = serde_json::Map::new();
-            obj.insert(
-                field.clone(),
-                serde_json::Value::String(filter.value.clone()),
-            );
-            qb.push_bind(serde_json::Value::Object(obj));
-        }
-
-        // --- JSONB field: _contains uses @> containment ---
-        (ColumnExpr::Jsonb { field }, FilterOp::Contains) => {
-            qb.push(r#""data" @> "#);
-            let mut obj = serde_json::Map::new();
-            obj.insert(
-                field.clone(),
-                serde_json::Value::String(filter.value.clone()),
-            );
+            // Try parsing as a typed JSON value (number, boolean, null) first;
+            // fall back to string if it's not valid JSON.
+            let json_val = serde_json::from_str::<serde_json::Value>(&filter.value)
+                .unwrap_or_else(|_| serde_json::Value::String(filter.value.clone()));
+            obj.insert(field.clone(), json_val);
             qb.push_bind(serde_json::Value::Object(obj));
         }
 
         // --- JSONB field: _in uses text extraction + ANY ---
         (ColumnExpr::Jsonb { field }, FilterOp::In) => {
-            // data->>'field' = ANY($1)
-            qb.push(format!(
-                r#""data"->>'{field}' = ANY("#,
-                field = escape_jsonb_key(field)
-            ));
             let values: Vec<String> = filter
                 .value
                 .split(',')
                 .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
                 .collect();
-            qb.push_bind(values);
-            qb.push(")");
+            if values.is_empty() {
+                qb.push("FALSE");
+            } else {
+                // data->>'field' = ANY($1)
+                qb.push(format!(
+                    r#""data"->>'{field}' = ANY("#,
+                    field = escape_jsonb_key(field)
+                ));
+                qb.push_bind(values);
+                qb.push(")");
+            }
         }
 
         // --- JSONB field: range operators use text extraction ---
@@ -360,6 +360,70 @@ mod tests {
         assert!(
             sql.contains(r#""data"->>'tag' = ANY("#),
             "expected JSONB extraction + ANY, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn build_query_jsonb_eq_numeric_value_not_wrapped_as_string() {
+        let target = QueryTarget::Accounts {
+            schema: "s".to_string(),
+            table: "t".to_string(),
+        };
+        let filters = vec![ResolvedFilter {
+            column_expr: ColumnExpr::Jsonb {
+                field: "count".to_string(),
+            },
+            op: FilterOp::Eq,
+            value: "42".to_string(),
+        }];
+
+        let qb = build_query(&target, &filters, 50, 0);
+        let sql = qb.sql();
+        // The value should be bound as JSON number, not string
+        assert!(sql.contains(r#""data" @> "#));
+    }
+
+    #[test]
+    fn build_query_promoted_in_empty_value_produces_false() {
+        let target = QueryTarget::Accounts {
+            schema: "s".to_string(),
+            table: "t".to_string(),
+        };
+        let filters = vec![ResolvedFilter {
+            column_expr: ColumnExpr::Promoted {
+                column: "status".to_string(),
+            },
+            op: FilterOp::In,
+            value: "".to_string(),
+        }];
+
+        let qb = build_query(&target, &filters, 50, 0);
+        let sql = qb.sql();
+        assert!(
+            sql.contains("FALSE"),
+            "empty _in should produce FALSE, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn build_query_jsonb_in_empty_value_produces_false() {
+        let target = QueryTarget::Accounts {
+            schema: "s".to_string(),
+            table: "t".to_string(),
+        };
+        let filters = vec![ResolvedFilter {
+            column_expr: ColumnExpr::Jsonb {
+                field: "tag".to_string(),
+            },
+            op: FilterOp::In,
+            value: "".to_string(),
+        }];
+
+        let qb = build_query(&target, &filters, 50, 0);
+        let sql = qb.sql();
+        assert!(
+            sql.contains("FALSE"),
+            "empty _in should produce FALSE, got: {sql}"
         );
     }
 

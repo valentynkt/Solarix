@@ -453,11 +453,16 @@ mod tests {
 
     #[tokio::test]
     async fn api_error_invalid_filter_returns_400() {
-        let err = ApiError::InvalidFilter("bad filter".to_string());
+        let err = ApiError::InvalidFilter {
+            message: "bad filter".to_string(),
+            available_fields: vec!["amount".to_string(), "owner".to_string()],
+        };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], "INVALID_FILTER");
+        assert_eq!(body["error"]["available_fields"][0], "amount");
+        assert_eq!(body["error"]["available_fields"][1], "owner");
     }
 
     #[tokio::test]

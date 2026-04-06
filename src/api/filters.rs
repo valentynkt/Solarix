@@ -1,5 +1,5 @@
 // std library
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 // external crates
 use anchor_lang_idl_spec::{IdlField, IdlTypeDef};
@@ -84,11 +84,10 @@ pub struct ResolvedFilter {
 /// For each remaining param, extracts the operator suffix (longest match first).
 /// If no operator suffix matches, defaults to `Eq`.
 pub fn parse_filters(params: &HashMap<String, String>) -> Vec<ParsedFilter> {
-    let reserved: HashSet<&str> = RESERVED_PARAMS.iter().copied().collect();
     let mut filters = Vec::new();
 
     for (key, value) in params {
-        if reserved.contains(key.as_str()) {
+        if RESERVED_PARAMS.contains(&key.as_str()) {
             continue;
         }
 
@@ -160,48 +159,54 @@ pub fn resolve_filters(
     let mut resolved = Vec::with_capacity(parsed.len());
 
     for filter in parsed {
-        if fixed_columns.contains(&filter.field.as_str()) {
-            resolved.push(ResolvedFilter {
-                column_expr: ColumnExpr::Promoted {
-                    column: filter.field.clone(),
-                },
-                op: filter.op,
-                value: filter.value.clone(),
+        let column_expr = if fixed_columns.contains(&filter.field.as_str()) {
+            ColumnExpr::Promoted {
+                column: filter.field.clone(),
+            }
+        } else {
+            // Look up field in IDL
+            match fields.iter().find(|f| f.name == filter.field) {
+                Some(f) => {
+                    if map_idl_type_to_pg(&f.ty, types).is_some() {
+                        ColumnExpr::Promoted {
+                            column: filter.field.clone(),
+                        }
+                    } else {
+                        ColumnExpr::Jsonb {
+                            field: filter.field.clone(),
+                        }
+                    }
+                }
+                None => {
+                    let mut available: Vec<String> =
+                        fixed_columns.iter().map(|s| (*s).to_string()).collect();
+                    available.extend(fields.iter().map(|f| f.name.clone()));
+                    return Err(ApiError::InvalidFilter {
+                        message: format!("Unknown field '{}'", filter.field),
+                        available_fields: available,
+                    });
+                }
+            }
+        };
+
+        // Reject _contains on promoted columns (requires JSONB @> operator)
+        if matches!(filter.op, FilterOp::Contains)
+            && matches!(&column_expr, ColumnExpr::Promoted { .. })
+        {
+            return Err(ApiError::InvalidFilter {
+                message: format!(
+                    "Operator '_contains' is not supported on column '{}'",
+                    filter.field
+                ),
+                available_fields: vec![],
             });
-            continue;
         }
 
-        // Look up field in IDL
-        let idl_field = fields.iter().find(|f| f.name == filter.field);
-
-        match idl_field {
-            Some(f) => {
-                let column_expr = if map_idl_type_to_pg(&f.ty, types).is_some() {
-                    ColumnExpr::Promoted {
-                        column: filter.field.clone(),
-                    }
-                } else {
-                    ColumnExpr::Jsonb {
-                        field: filter.field.clone(),
-                    }
-                };
-                resolved.push(ResolvedFilter {
-                    column_expr,
-                    op: filter.op,
-                    value: filter.value.clone(),
-                });
-            }
-            None => {
-                let mut available: Vec<String> =
-                    fixed_columns.iter().map(|s| (*s).to_string()).collect();
-                available.extend(fields.iter().map(|f| f.name.clone()));
-                return Err(ApiError::InvalidFilter(format!(
-                    "Unknown field '{}'. Available fields: [{}]",
-                    filter.field,
-                    available.join(", ")
-                )));
-            }
-        }
+        resolved.push(ResolvedFilter {
+            column_expr,
+            op: filter.op,
+            value: filter.value.clone(),
+        });
     }
 
     Ok(resolved)
@@ -415,11 +420,18 @@ mod tests {
         }];
 
         let err = resolve_filters(&parsed, &fields, &[], FilterContext::Accounts).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Unknown field 'nonexistent'"));
-        assert!(msg.contains("amount"));
-        assert!(msg.contains("owner"));
-        assert!(msg.contains("pubkey"));
+        match err {
+            ApiError::InvalidFilter {
+                message,
+                available_fields,
+            } => {
+                assert!(message.contains("Unknown field 'nonexistent'"));
+                assert!(available_fields.contains(&"amount".to_string()));
+                assert!(available_fields.contains(&"owner".to_string()));
+                assert!(available_fields.contains(&"pubkey".to_string()));
+            }
+            other => panic!("expected InvalidFilter, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -495,6 +507,34 @@ mod tests {
             ColumnExpr::Promoted { .. }
         ));
         assert!(matches!(&resolved[1].column_expr, ColumnExpr::Jsonb { .. }));
+    }
+
+    #[test]
+    fn resolve_rejects_contains_on_promoted_column() {
+        let fields = sample_idl_fields();
+        let parsed = vec![ParsedFilter {
+            field: "amount".to_string(),
+            op: FilterOp::Contains,
+            value: "foo".to_string(),
+        }];
+
+        let err = resolve_filters(&parsed, &fields, &[], FilterContext::Accounts).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("_contains"));
+        assert!(msg.contains("amount"));
+    }
+
+    #[test]
+    fn resolve_rejects_contains_on_fixed_column() {
+        let parsed = vec![ParsedFilter {
+            field: "slot".to_string(),
+            op: FilterOp::Contains,
+            value: "foo".to_string(),
+        }];
+
+        let err = resolve_filters(&parsed, &[], &[], FilterContext::Instructions).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("_contains"));
     }
 
     // --- FilterOp::as_sql tests ---

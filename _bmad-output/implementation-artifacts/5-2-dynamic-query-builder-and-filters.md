@@ -1,6 +1,6 @@
 # Story 5.2: Dynamic Query Builder & Filters
 
-Status: review
+Status: done
 
 ## Story
 
@@ -368,6 +368,19 @@ Test helpers: create `IdlField` instances directly since the struct has public f
 - [Source: src/api/filters.rs -- placeholder to replace]
 - [Source: src/storage/queries.rs -- placeholder to replace]
 - [Source: src/storage/schema.rs -- map_idl_type_to_pg, quote_ident, sanitize_identifier]
+
+### Review Findings
+
+- [x] [Review][Decision] JSONB range queries missing `::TYPE` cast — DEFERRED. All Jsonb fields are complex types (map_idl_type_to_pg returned None) where range queries don't have meaningful numeric semantics. Text comparison is a cosmetic issue, not a real bug. [src/storage/queries.rs:134-143]
+- [x] [Review][Patch] JSONB `_eq`/`_contains` always wraps value as JSON string — FIXED. Now tries `serde_json::from_str` first, falls back to `Value::String`. Numeric/boolean JSONB values now match correctly. [src/storage/queries.rs:97-108]
+- [x] [Review][Patch] Promoted `_contains` generates invalid SQL — FIXED. `resolve_filters` now rejects `_contains` on promoted columns with `InvalidFilter` error. [src/api/filters.rs:180-188]
+- [x] [Review][Patch] Error response missing `available_fields` as separate JSON key — FIXED. `InvalidFilter` now carries `Vec<String>` and `IntoResponse` emits `available_fields` array in error JSON. [src/api/mod.rs:31-35, 68-78]
+- [x] [Review][Patch] Empty `_in` value matches empty string — FIXED. Empty strings filtered out after comma split; empty result produces `FALSE` clause. [src/storage/queries.rs:79-92, 123-136]
+- [x] [Review][Patch] HashSet rebuilt on every `parse_filters` call — FIXED. Now uses `RESERVED_PARAMS.contains()` directly on slice. [src/api/filters.rs:87]
+- [x] [Review][Defer] No max limit enforcement / negative limit bypasses pagination — handler responsibility (story 5.3) [src/storage/queries.rs:21-26] — deferred, story 5.3 scope
+- [x] [Review][Defer] No value format validation — string value on numeric promoted column yields 500 instead of 400 — handler-level validation (story 5.3) [src/api/filters.rs, src/storage/queries.rs] — deferred, story 5.3 scope
+- [x] [Review][Defer] Fixed columns (`instruction_index`, `is_inner_ix`, `is_closed`) filterable but not in SELECT — spec inconsistency, needs product decision [src/storage/queries.rs:30,34] — deferred, spec clarification needed
+- [x] [Review][Defer] No tests verifying HTTP error response JSON structure for `InvalidFilter` — integration testing scope (story 6.3) — deferred, story 6.3 scope
 
 ## Dev Agent Record
 
