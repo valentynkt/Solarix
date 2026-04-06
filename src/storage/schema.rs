@@ -1,6 +1,8 @@
 // std library
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::future::Future;
+use std::pin::Pin;
 
 // external crates
 use anchor_lang_idl_spec::{Idl, IdlDefinedFields, IdlField, IdlType, IdlTypeDef, IdlTypeDefTy};
@@ -351,95 +353,92 @@ pub fn build_ddl_statements(idl: &Idl, schema_name: &str) -> Vec<String> {
 ///
 /// Executes all DDL in a transaction. On failure, all changes are rolled back.
 ///
-/// Takes owned `PgPool` (cheap clone) because borrowing `&PgPool` across the
-/// transaction loop creates a future where the sqlx `Executor` lifetime is not
-/// general enough for `Send`.
-pub async fn generate_schema(
+/// All parameters are owned so the returned future is `'static` + `Send`.
+/// Borrowed parameters create futures with specific lifetimes that Rust's async
+/// Send inference cannot prove "general enough" when composed in larger state
+/// machines (known compiler limitation, see rust#96865).
+pub fn generate_schema(
     pool: PgPool,
-    idl: &Idl,
-    program_id: &str,
-    schema_name: &str,
-) -> Result<(), StorageError> {
-    let statements = build_ddl_statements(idl, schema_name);
-    let batch = statements.join("\n");
+    idl: Idl,
+    program_id: String,
+    schema_name: String,
+) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send>> {
+    Box::pin(async move {
+        let statements = build_ddl_statements(&idl, &schema_name);
+        let batch = statements.join("\n");
 
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| StorageError::DdlFailed(e.to_string()))?;
+        // Execute DDL directly on the pool (no explicit transaction).
+        // All DDL uses IF NOT EXISTS, making each statement idempotent.
+        // PostgreSQL wraps multi-statement raw_sql in an implicit transaction.
+        // This avoids the `tx.as_mut()` reference that triggers the
+        // "Executor not general enough" compiler inference failure with Box::pin.
+        sqlx::raw_sql(&batch)
+            .execute(&pool)
+            .await
+            .map_err(|e| StorageError::DdlFailed(format!("DDL failed for {schema_name}: {e}")))?;
 
-    sqlx::raw_sql(&batch)
-        .execute(tx.as_mut())
-        .await
-        .map_err(|e| StorageError::DdlFailed(format!("DDL failed for {schema_name}: {e}")))?;
+        info!(
+            %program_id,
+            %schema_name,
+            statements = statements.len(),
+            "schema generated"
+        );
 
-    tx.commit()
-        .await
-        .map_err(|e| StorageError::DdlFailed(e.to_string()))?;
-
-    info!(
-        program_id,
-        schema_name,
-        statements = statements.len(),
-        "schema generated"
-    );
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Seed the `_metadata` table with program information.
 ///
 /// Uses INSERT ... ON CONFLICT DO UPDATE for idempotency.
-/// Takes owned `PgPool` for the same Send-safety reason as `generate_schema`.
-pub async fn seed_metadata(
+pub fn seed_metadata(
     pool: PgPool,
-    idl: &Idl,
-    program_id: &str,
-    idl_hash: &str,
-    schema_name: &str,
-) -> Result<(), StorageError> {
-    let account_type_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
-    let instruction_names: Vec<&str> = idl.instructions.iter().map(|i| i.name.as_str()).collect();
+    idl: Idl,
+    program_id: String,
+    idl_hash: String,
+    schema_name: String,
+) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send>> {
+    Box::pin(async move {
+        let account_type_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        let instruction_names: Vec<&str> =
+            idl.instructions.iter().map(|i| i.name.as_str()).collect();
 
-    let metadata_entries = vec![
-        ("program_id", serde_json::json!(program_id)),
-        ("program_name", serde_json::json!(&idl.metadata.name)),
-        ("idl_hash", serde_json::json!(idl_hash)),
-        ("idl_version", serde_json::json!(&idl.metadata.version)),
-        ("account_types", serde_json::json!(account_type_names)),
-        ("instruction_types", serde_json::json!(instruction_names)),
-    ];
+        let metadata_entries = vec![
+            ("program_id", serde_json::json!(&program_id)),
+            ("program_name", serde_json::json!(&idl.metadata.name)),
+            ("idl_hash", serde_json::json!(&idl_hash)),
+            ("idl_version", serde_json::json!(&idl.metadata.version)),
+            ("account_types", serde_json::json!(account_type_names)),
+            ("instruction_types", serde_json::json!(instruction_names)),
+        ];
 
-    let qualified = format!("{}.{}", quote_ident(schema_name), quote_ident("_metadata"));
+        let qualified = format!("{}.{}", quote_ident(&schema_name), quote_ident("_metadata"));
 
-    // Build all INSERT statements as a single batch to avoid for-loop + await
-    // pattern that produces !Send futures with sqlx. Values are IDL-derived
-    // (not user input); single-quote escaping ensures SQL safety.
-    let mut batch = String::new();
-    for (key, value) in &metadata_entries {
-        let json_str = serde_json::to_string(value).unwrap_or_default();
-        let escaped = json_str.replace('\'', "''");
+        let mut batch = String::new();
+        for (key, value) in &metadata_entries {
+            let json_str = serde_json::to_string(value).unwrap_or_default();
+            let escaped = json_str.replace('\'', "''");
+            let _ = write!(
+                batch,
+                r#"INSERT INTO {qualified} ("key", "value") VALUES ('{key}', '{escaped}'::jsonb)
+                   ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value";
+"#
+            );
+        }
         let _ = write!(
             batch,
-            r#"INSERT INTO {qualified} ("key", "value") VALUES ('{key}', '{escaped}'::jsonb)
-               ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value";
-"#
+            r#"INSERT INTO {qualified} ("key", "value") VALUES ('schema_created_at', to_jsonb(NOW()::text))
+               ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value";"#
         );
-    }
-    // schema_created_at uses SQL NOW() to avoid needing chrono as a direct dependency
-    let _ = write!(
-        batch,
-        r#"INSERT INTO {qualified} ("key", "value") VALUES ('schema_created_at', to_jsonb(NOW()::text))
-           ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value";"#
-    );
 
-    sqlx::raw_sql(&batch).execute(&pool).await.map_err(|e| {
-        StorageError::DdlFailed(format!("metadata seed failed for {schema_name}: {e}"))
-    })?;
+        sqlx::raw_sql(&batch).execute(&pool).await.map_err(|e| {
+            StorageError::DdlFailed(format!("metadata seed failed for {schema_name}: {e}"))
+        })?;
 
-    info!(schema_name, "metadata seeded");
+        info!(%schema_name, "metadata seeded");
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]

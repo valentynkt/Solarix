@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,17 +68,18 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Val
     )
 }
 
-#[axum::debug_handler]
 pub async fn register_program(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterProgramRequest>,
 ) -> Result<Response, ApiError> {
     let registry = Arc::clone(&state.registry);
     let pool = state.pool.clone();
-    do_register_program(registry, pool, body).await
+    tokio::spawn(do_register(registry, pool, body))
+        .await
+        .map_err(|e| ApiError::StorageError(format!("task failed: {e}")))?
 }
 
-async fn do_register_program(
+async fn do_register(
     registry: Arc<tokio::sync::RwLock<ProgramRegistry>>,
     pool: sqlx::PgPool,
     body: RegisterProgramRequest,
@@ -87,27 +90,14 @@ async fn do_register_program(
         .transpose()
         .map_err(|e| ApiError::InvalidRequest(format!("invalid IDL JSON: {e}")))?;
 
-    // Phase 1: Acquire write lock, prepare IDL + extract owned data, drop lock.
-    let data = {
-        let mut guard = registry.write().await;
-        let result = guard.prepare_registration(body.program_id, idl_json);
-        drop(guard);
-        result?
-    };
+    let data = prepare_registration(Arc::clone(&registry), body.program_id, idl_json).await?;
 
-    // Phase 2: DB + schema work without any lock held.
-    // commit_registration takes OWNED PgPool + RegistrationData so all sqlx
-    // references are scoped to its own state machine, keeping this future Send.
     let was_cached = data.was_cached;
     let program_id_for_rollback = data.program_id.clone();
     let result = ProgramRegistry::commit_registration(pool, data).await;
 
-    // Phase 3: Rollback cache on failure if the IDL was freshly added.
     if result.is_err() && !was_cached {
-        registry
-            .write()
-            .await
-            .rollback_cache(&program_id_for_rollback);
+        rollback_cache(registry, program_id_for_rollback).await;
     }
 
     let program_info = result?;
@@ -132,6 +122,35 @@ async fn do_register_program(
         })),
     )
         .into_response())
+}
+
+/// Acquire write lock, run prepare_registration, drop lock.
+///
+/// Returns a boxed `Send` future to hide the specific-lifetime `&RwLock`
+/// reference from `registry.write()`. Without boxing, this lifetime
+/// propagates through the opaque `impl Future` return type, causing the
+/// caller's composed state machine to fail Send inference.
+fn prepare_registration(
+    registry: Arc<tokio::sync::RwLock<ProgramRegistry>>,
+    program_id: String,
+    idl_json: Option<String>,
+) -> Pin<Box<dyn Future<Output = Result<crate::registry::RegistrationData, ApiError>> + Send>> {
+    Box::pin(async move {
+        let mut guard = registry.write().await;
+        let result = guard.prepare_registration(program_id, idl_json);
+        drop(guard);
+        Ok(result?)
+    })
+}
+
+/// Roll back IDL cache on failed registration.
+fn rollback_cache(
+    registry: Arc<tokio::sync::RwLock<ProgramRegistry>>,
+    program_id: String,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        registry.write().await.rollback_cache(&program_id);
+    })
 }
 
 pub async fn list_programs(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {

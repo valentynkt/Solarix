@@ -1,3 +1,7 @@
+// std library
+use std::future::Future;
+use std::pin::Pin;
+
 // external crates
 use anchor_lang_idl_spec::Idl;
 use sqlx::PgPool;
@@ -117,76 +121,84 @@ impl ProgramRegistry {
 
     /// Phase 2: Commit registration to the database and generate the schema.
     ///
-    /// This is a static method -- it does not require `&self` so the caller
-    /// can drop the write-lock on `ProgramRegistry` before calling it.
-    /// Phase 2: Commit registration to the database and generate the schema.
-    ///
-    /// IMPORTANT: No inline `sqlx::query().execute().await` in this function.
-    /// All DB work is delegated to separate named async fns. This is required
-    /// because Rust's async Send inference breaks when sqlx Executor references
-    /// appear inline in functions with multiple .await points (the "Executor
-    /// lifetime not general enough" issue). Leaf async fns with sqlx calls get
-    /// their own opaque future type, which the compiler CAN prove Send.
+    /// Static method — does not require `&self` so the caller can drop the
+    /// write-lock before calling. All parameters are owned so the returned
+    /// future is `'static` + `Send`. Borrowed parameters create futures with
+    /// specific lifetimes that fail Rust's async Send inference in composed
+    /// state machines (compiler limitation, see rust#96865).
     pub async fn commit_registration(
         pool: PgPool,
         data: RegistrationData,
     ) -> Result<ProgramInfo, RegistrationError> {
         Self::write_registration(
-            &pool,
-            &data.program_id,
-            &data.program_name,
-            &data.schema_name,
-            &data.idl_hash,
-            &data.idl_source,
+            pool.clone(),
+            data.program_id.clone(),
+            data.program_name.clone(),
+            data.schema_name.clone(),
+            data.idl_hash.clone(),
+            data.idl_source.clone(),
         )
         .await?;
 
-        let status =
-            match generate_schema(pool.clone(), &data.idl, &data.program_id, &data.schema_name)
+        let status = match generate_schema(
+            pool.clone(),
+            data.idl.clone(),
+            data.program_id.clone(),
+            data.schema_name.clone(),
+        )
+        .await
+        {
+            Ok(()) => {
+                if let Err(e) = seed_metadata(
+                    pool.clone(),
+                    data.idl.clone(),
+                    data.program_id.clone(),
+                    data.idl_hash.clone(),
+                    data.schema_name.clone(),
+                )
                 .await
-            {
-                Ok(()) => {
-                    if let Err(e) = seed_metadata(
-                        pool.clone(),
-                        &data.idl,
-                        &data.program_id,
-                        &data.idl_hash,
-                        &data.schema_name,
-                    )
-                    .await
-                    {
-                        warn!(
-                            program_id = %data.program_id,
-                            schema_name = %data.schema_name,
-                            error = %e,
-                            "metadata seeding failed (schema was created successfully)"
-                        );
-                    }
-
-                    Self::update_program_status(&pool, &data.program_id, "schema_created").await?;
-                    "schema_created".to_string()
-                }
-                Err(e) => {
+                {
                     warn!(
                         program_id = %data.program_id,
                         schema_name = %data.schema_name,
                         error = %e,
-                        "schema generation failed"
+                        "metadata seeding failed (schema was created successfully)"
                     );
-
-                    if let Err(update_err) =
-                        Self::update_program_status(&pool, &data.program_id, "error").await
-                    {
-                        error!(
-                            program_id = %data.program_id,
-                            error = %update_err,
-                            "failed to update program status to 'error'"
-                        );
-                    }
-
-                    return Err(RegistrationError::SchemaFailed(e));
                 }
-            };
+
+                Self::update_program_status(
+                    pool.clone(),
+                    data.program_id.clone(),
+                    "schema_created".to_string(),
+                )
+                .await?;
+                "schema_created".to_string()
+            }
+            Err(e) => {
+                warn!(
+                    program_id = %data.program_id,
+                    schema_name = %data.schema_name,
+                    error = %e,
+                    "schema generation failed"
+                );
+
+                if let Err(update_err) = Self::update_program_status(
+                    pool.clone(),
+                    data.program_id.clone(),
+                    "error".to_string(),
+                )
+                .await
+                {
+                    error!(
+                        program_id = %data.program_id,
+                        error = %update_err,
+                        "failed to update program status to 'error'"
+                    );
+                }
+
+                return Err(RegistrationError::SchemaFailed(e));
+            }
+        };
 
         info!(
             program_id = %data.program_id,
@@ -208,89 +220,90 @@ impl ProgramRegistry {
     }
 
     /// Update a program's status in the DB.
-    ///
-    /// Isolated in its own named async fn to keep the caller's future Send.
-    async fn update_program_status(
-        pool: &PgPool,
-        program_id: &str,
-        status: &str,
-    ) -> Result<(), RegistrationError> {
-        sqlx::query(
-            r#"UPDATE "programs" SET "status" = $1, "updated_at" = NOW()
-               WHERE "program_id" = $2"#,
-        )
-        .bind(status)
-        .bind(program_id)
-        .execute(pool)
-        .await
-        .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
-        Ok(())
+    fn update_program_status(
+        pool: PgPool,
+        program_id: String,
+        status: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), RegistrationError>> + Send>> {
+        Box::pin(async move {
+            sqlx::query(
+                r#"UPDATE "programs" SET "status" = $1, "updated_at" = NOW()
+                   WHERE "program_id" = $2"#,
+            )
+            .bind(&status)
+            .bind(&program_id)
+            .execute(&pool)
+            .await
+            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+            Ok(())
+        })
     }
 
     /// Roll back IDL cache entry added during a failed registration.
-    ///
-    /// Call this only when `prepare_registration` succeeded but
-    /// `commit_registration` failed, and only when `data.was_cached` is `false`
-    /// (i.e., the IDL was freshly added by the prepare phase).
     pub fn rollback_cache(&mut self, program_id: &str) {
         self.idl_manager.remove_cached(program_id);
     }
 
     /// Execute registration DB writes in a single transaction.
     ///
-    /// Checks for duplicate, inserts into `programs` and `indexer_state` atomically.
-    async fn write_registration(
-        pool: &PgPool,
-        program_id: &str,
-        program_name: &str,
-        schema_name: &str,
-        idl_hash: &str,
-        idl_source: &str,
-    ) -> Result<(), RegistrationError> {
-        let mut tx = pool
-            .begin()
+    /// Returns a boxed `Send` future to hide the `Executor` lifetime from
+    /// `tx.as_mut()`. Without boxing, the specific `&'1 mut PgConnection`
+    /// lifetime propagates through the opaque return type, causing the
+    /// "Executor not general enough" error in composed async state machines.
+    fn write_registration(
+        pool: PgPool,
+        program_id: String,
+        program_name: String,
+        schema_name: String,
+        idl_hash: String,
+        idl_source: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), RegistrationError>> + Send>> {
+        Box::pin(async move {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
+            let exists: bool = sqlx::query_scalar(
+                r#"SELECT EXISTS(SELECT 1 FROM "programs" WHERE "program_id" = $1)"#,
+            )
+            .bind(&program_id)
+            .fetch_one(tx.as_mut())
             .await
             .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
 
-        let exists: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "programs" WHERE "program_id" = $1)"#,
-        )
-        .bind(program_id)
-        .fetch_one(tx.as_mut())
-        .await
-        .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+            if exists {
+                return Err(RegistrationError::AlreadyRegistered(program_id));
+            }
 
-        if exists {
-            return Err(RegistrationError::AlreadyRegistered(program_id.to_string()));
-        }
-
-        sqlx::query(
-            r#"INSERT INTO "programs" ("program_id", "program_name", "schema_name", "idl_hash", "idl_source", "status")
-               VALUES ($1, $2, $3, $4, $5, 'registered')"#,
-        )
-        .bind(program_id)
-        .bind(program_name)
-        .bind(schema_name)
-        .bind(idl_hash)
-        .bind(idl_source)
-        .execute(tx.as_mut())
-        .await
-        .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
-
-        sqlx::query(
-            r#"INSERT INTO "indexer_state" ("program_id", "status", "total_instructions", "total_accounts")
-               VALUES ($1, 'initializing', 0, 0)"#,
-        )
-        .bind(program_id)
-        .execute(tx.as_mut())
-        .await
-        .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
-
-        tx.commit()
+            sqlx::query(
+                r#"INSERT INTO "programs" ("program_id", "program_name", "schema_name", "idl_hash", "idl_source", "status")
+                   VALUES ($1, $2, $3, $4, $5, 'registered')"#,
+            )
+            .bind(&program_id)
+            .bind(&program_name)
+            .bind(&schema_name)
+            .bind(&idl_hash)
+            .bind(&idl_source)
+            .execute(tx.as_mut())
             .await
             .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
 
-        Ok(())
+            sqlx::query(
+                r#"INSERT INTO "indexer_state" ("program_id", "status", "total_instructions", "total_accounts")
+                   VALUES ($1, 'initializing', 0, 0)"#,
+            )
+            .bind(&program_id)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
+            tx.commit()
+                .await
+                .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
+            Ok(())
+        })
     }
 
     /// Remove a program from the in-memory IDL cache.
