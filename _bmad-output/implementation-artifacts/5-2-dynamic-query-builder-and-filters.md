@@ -1,6 +1,6 @@
 # Story 5.2: Dynamic Query Builder & Filters
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -38,37 +38,37 @@ so that users can filter indexed data by any field without risk of SQL injection
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Implement filter operator enum and parser in `src/api/filters.rs` (AC: #1)
-  - [ ] Define `FilterOp` enum: `Eq`, `Ne`, `Gt`, `Gte`, `Lt`, `Lte`, `Contains`, `In`
-  - [ ] Define `ParsedFilter` struct: `field: String`, `op: FilterOp`, `value: String`
-  - [ ] Define `RESERVED_PARAMS` constant: `limit`, `offset`, `cursor`, `sort`, `order`
-  - [ ] Implement `parse_filters(params: &HashMap<String, String>) -> Vec<ParsedFilter>` that skips reserved params and parses `field_op=value`
-  - [ ] Parse by trying known operator suffixes from longest to shortest (`_contains` before `_in`), splitting on the last match; default to `Eq` if no operator suffix found
-- [ ] Task 2: Implement IDL field resolution and validation in `src/api/filters.rs` (AC: #2)
-  - [ ] Define `ResolvedFilter` struct: `column_expr: ColumnExpr`, `op: FilterOp`, `value: String`
-  - [ ] Define `ColumnExpr` enum: `Promoted { column: String }`, `Jsonb { field: String }`
-  - [ ] Implement `resolve_filters(parsed: &[ParsedFilter], fields: &[IdlField], types: &[IdlTypeDef]) -> Result<Vec<ResolvedFilter>, ApiError>`
-  - [ ] For each filter: check if field name matches a top-level IDL field where `map_idl_type_to_pg` returns `Some` -> `Promoted`; else if field exists in IDL but not promotable -> `Jsonb`; else -> `ApiError::InvalidFilter` with available field names
-  - [ ] Also accept common/fixed columns without IDL check (see Dev Notes below)
-- [ ] Task 3: Implement `QueryBuilder` in `src/storage/queries.rs` (AC: #3, #4)
-  - [ ] Define `QueryTarget` enum: `Instructions { schema: String }`, `Accounts { schema: String, table: String }`
-  - [ ] Implement `pub fn build_query(target: &QueryTarget, filters: &[ResolvedFilter], limit: i64, offset: i64) -> sqlx::QueryBuilder<'_, sqlx::Postgres>`
-  - [ ] Build SELECT with appropriate columns for instructions vs accounts
-  - [ ] Append WHERE clauses per filter: promoted columns use direct comparison; JSONB fields use `@>` containment with `push_bind(serde_json::json!({ field: value }))`
-  - [ ] For `_in` operator: split value on `,`, bind as `Vec<String>`, use `= ANY($)`
-  - [ ] For `_contains` on JSONB: use `@>` containment (not LIKE)
-  - [ ] Append ORDER BY, LIMIT, OFFSET
-- [ ] Task 4: Add `ApiError::InvalidValue` variant (AC: #2)
-  - [ ] Add `InvalidValue(String)` to `ApiError` in `src/api/mod.rs` mapping to 400 `INVALID_VALUE`
-- [ ] Task 5: Unit tests (AC: all)
-  - [ ] Test `parse_filters` with various operator suffixes, edge cases (field name containing `_gt` substring), reserved param skipping
-  - [ ] Test `resolve_filters` with promoted fields, JSONB-only fields, unknown fields returning error with available_fields
-  - [ ] Test `build_query` produces correct SQL structure for promoted vs JSONB filters, \_in arrays, \_contains
-- [ ] Task 6: Verify (AC: all)
-  - [ ] `cargo build` compiles
-  - [ ] `cargo clippy` passes
-  - [ ] `cargo fmt -- --check` passes
-  - [ ] `cargo test` passes all unit tests
+- [x] Task 1: Implement filter operator enum and parser in `src/api/filters.rs` (AC: #1)
+  - [x] Define `FilterOp` enum: `Eq`, `Ne`, `Gt`, `Gte`, `Lt`, `Lte`, `Contains`, `In`
+  - [x] Define `ParsedFilter` struct: `field: String`, `op: FilterOp`, `value: String`
+  - [x] Define `RESERVED_PARAMS` constant: `limit`, `offset`, `cursor`, `sort`, `order`
+  - [x] Implement `parse_filters(params: &HashMap<String, String>) -> Vec<ParsedFilter>` that skips reserved params and parses `field_op=value`
+  - [x] Parse by trying known operator suffixes from longest to shortest (`_contains` before `_in`), splitting on the last match; default to `Eq` if no operator suffix found
+- [x] Task 2: Implement IDL field resolution and validation in `src/api/filters.rs` (AC: #2)
+  - [x] Define `ResolvedFilter` struct: `column_expr: ColumnExpr`, `op: FilterOp`, `value: String`
+  - [x] Define `ColumnExpr` enum: `Promoted { column: String }`, `Jsonb { field: String }`
+  - [x] Implement `resolve_filters(parsed: &[ParsedFilter], fields: &[IdlField], types: &[IdlTypeDef]) -> Result<Vec<ResolvedFilter>, ApiError>`
+  - [x] For each filter: check if field name matches a top-level IDL field where `map_idl_type_to_pg` returns `Some` -> `Promoted`; else if field exists in IDL but not promotable -> `Jsonb`; else -> `ApiError::InvalidFilter` with available field names
+  - [x] Also accept common/fixed columns without IDL check (see Dev Notes below)
+- [x] Task 3: Implement `QueryBuilder` in `src/storage/queries.rs` (AC: #3, #4)
+  - [x] Define `QueryTarget` enum: `Instructions { schema: String }`, `Accounts { schema: String, table: String }`
+  - [x] Implement `pub fn build_query(target: &QueryTarget, filters: &[ResolvedFilter], limit: i64, offset: i64) -> sqlx::QueryBuilder<'_, sqlx::Postgres>`
+  - [x] Build SELECT with appropriate columns for instructions vs accounts
+  - [x] Append WHERE clauses per filter: promoted columns use direct comparison; JSONB fields use `@>` containment with `push_bind(serde_json::json!({ field: value }))`
+  - [x] For `_in` operator: split value on `,`, bind as `Vec<String>`, use `= ANY($)`
+  - [x] For `_contains` on JSONB: use `@>` containment (not LIKE)
+  - [x] Append ORDER BY, LIMIT, OFFSET
+- [x] Task 4: Add `ApiError::InvalidValue` variant (AC: #2)
+  - [x] Add `InvalidValue(String)` to `ApiError` in `src/api/mod.rs` mapping to 400 `INVALID_VALUE`
+- [x] Task 5: Unit tests (AC: all)
+  - [x] Test `parse_filters` with various operator suffixes, edge cases (field name containing `_gt` substring), reserved param skipping
+  - [x] Test `resolve_filters` with promoted fields, JSONB-only fields, unknown fields returning error with available_fields
+  - [x] Test `build_query` produces correct SQL structure for promoted vs JSONB filters, \_in arrays, \_contains
+- [x] Task 6: Verify (AC: all)
+  - [x] `cargo build` compiles
+  - [x] `cargo clippy` passes
+  - [x] `cargo fmt -- --check` passes
+  - [x] `cargo test` passes all unit tests
 
 ## Dev Notes
 
@@ -373,10 +373,31 @@ Test helpers: create `IdlField` instances directly since the struct has public f
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- Initial JSONB key escaping produced double-quoted keys (`''score''`); fixed `escape_jsonb_key` to return raw escaped string, caller adds outer quotes in format string.
+
 ### Completion Notes List
 
+- Implemented `FilterOp` enum (8 operators) with `as_sql()` method for SQL operator mapping
+- Implemented `ParsedFilter` and `parse_filters()` with longest-suffix-first matching strategy
+- Implemented `ColumnExpr` enum (Promoted/Jsonb), `ResolvedFilter`, and `resolve_filters()` with IDL-aware field classification using `map_idl_type_to_pg`
+- Added `FilterContext` enum to distinguish instruction vs account fixed columns
+- Implemented `QueryTarget` enum and `build_query()` producing complete SELECT with WHERE, ORDER BY, LIMIT, OFFSET
+- JSONB equality/contains uses `@>` containment (GIN-optimized); range queries use `->>`text extraction
+- `_in` operator splits on comma, binds as `Vec<String>` with `= ANY()`
+- Added `ApiError::InvalidValue` variant with 400 status and `INVALID_VALUE` code
+- 36 new unit tests (10 parse_filters, 7 resolve_filters, 12 build_query, 1 operator mapping, 1 escape, 5 existing passing)
+- All 145 tests pass, clippy clean, fmt clean
+
 ### File List
+
+- `src/api/filters.rs` — Rewritten: filter parsing, operator enum, IDL validation, unit tests
+- `src/storage/queries.rs` — Rewritten: dynamic SQL query builder, unit tests
+- `src/api/mod.rs` — Modified: added `InvalidValue` variant to `ApiError` + `IntoResponse` mapping
+
+### Change Log
+
+- 2026-04-06: Story 5.2 implementation complete — filter parser, IDL resolver, query builder, unit tests

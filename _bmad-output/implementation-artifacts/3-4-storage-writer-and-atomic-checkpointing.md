@@ -1,6 +1,6 @@
 # Story 3.4: Storage Writer & Atomic Checkpointing
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -55,50 +55,50 @@ so that the pipeline has a reliable, crash-safe persistence layer.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Define `StorageWriter` struct and constructor (AC: #6)
-  - [ ] Replace empty stub in `src/storage/writer.rs` with `StorageWriter { pool: PgPool }`
-  - [ ] Add `pub fn new(pool: PgPool) -> Self`
-  - [ ] Add necessary imports (sqlx, serde_json, tracing, types)
+- [x] Task 1: Define `StorageWriter` struct and constructor (AC: #6)
+  - [x] Replace empty stub in `src/storage/writer.rs` with `StorageWriter { pool: PgPool }`
+  - [x] Add `pub fn new(pool: PgPool) -> Self`
+  - [x] Add necessary imports (sqlx, serde_json, tracing, types)
 
-- [ ] Task 2: Implement `write_instructions` batch INSERT (AC: #1)
-  - [ ] Add private method `async fn write_instructions(tx: &mut PgConnection, schema_name: &str, instructions: &[DecodedInstruction]) -> Result<u64, StorageError>`
-  - [ ] Decompose `Vec<DecodedInstruction>` into column vectors: signatures, slots, block_times, instruction_names, instruction_indexes, inner_indexes, args, accounts, data, is_inner_ix
-  - [ ] Build `INSERT INTO {schema}."_instructions" (...) SELECT * FROM UNNEST($1::TEXT[], $2::BIGINT[], ...) ON CONFLICT ... DO NOTHING`
-  - [ ] Use `sqlx::types::Json<Vec<serde_json::Value>>` for JSONB array columns
-  - [ ] Return rows affected count
-  - [ ] Handle empty instructions vec (skip INSERT, return 0)
+- [x] Task 2: Implement `write_instructions` batch INSERT (AC: #1)
+  - [x] Add private method `async fn write_instructions(tx: &mut PgConnection, schema_name: &str, instructions: &[DecodedInstruction]) -> Result<u64, StorageError>`
+  - [x] Decompose `Vec<DecodedInstruction>` into column vectors: signatures, slots, block_times, instruction_names, instruction_indexes, inner_indexes, args, accounts, data, is_inner_ix
+  - [x] Build `INSERT INTO {schema}."_instructions" (...) SELECT * FROM UNNEST($1::TEXT[], $2::BIGINT[], ...) ON CONFLICT ... DO NOTHING`
+  - [x] Use `sqlx::types::Json<Vec<serde_json::Value>>` for JSONB array columns
+  - [x] Return rows affected count
+  - [x] Handle empty instructions vec (skip INSERT, return 0)
 
-- [ ] Task 3: Implement `write_accounts` upsert (AC: #2)
-  - [ ] Add private method `async fn write_accounts(tx: &mut PgConnection, schema_name: &str, accounts: &[DecodedAccount]) -> Result<u64, StorageError>`
-  - [ ] Group accounts by `account_type` for routing to correct tables
-  - [ ] **CRITICAL:** Apply `sanitize_identifier(&account_type)` to derive the actual table name (DDL lowercases via `sanitize_identifier`, e.g., `"TokenAccount"` -> `"tokenaccount"`)
-  - [ ] For each account type batch, build UNNEST upsert: `INSERT INTO {schema}."{sanitized_account_type}" (pubkey, slot_updated, lamports, data, updated_at, ...promoted...) SELECT * FROM UNNEST(...) ON CONFLICT (pubkey) DO UPDATE SET ... WHERE EXCLUDED.slot_updated > {table}.slot_updated`
-  - [ ] Implement `safe_u64_to_i64(value: u64) -> Option<i64>` for overflow guard
-  - [ ] Implement promoted column value extraction from `DecodedAccount.data` JSON
-  - [ ] Set `updated_at = NOW()` explicitly on both INSERT and UPDATE paths
+- [x] Task 3: Implement `write_accounts` upsert (AC: #2)
+  - [x] Add private method `async fn write_accounts(tx: &mut PgConnection, schema_name: &str, accounts: &[DecodedAccount]) -> Result<u64, StorageError>`
+  - [x] Group accounts by `account_type` for routing to correct tables
+  - [x] **CRITICAL:** Apply `sanitize_identifier(&account_type)` to derive the actual table name (DDL lowercases via `sanitize_identifier`, e.g., `"TokenAccount"` -> `"tokenaccount"`)
+  - [x] For each account type batch, build UNNEST upsert: `INSERT INTO {schema}."{sanitized_account_type}" (pubkey, slot_updated, lamports, data, updated_at, ...promoted...) SELECT * FROM UNNEST(...) ON CONFLICT (pubkey) DO UPDATE SET ... WHERE EXCLUDED.slot_updated > {table}.slot_updated`
+  - [x] Implement `safe_u64_to_i64(value: u64) -> Option<i64>` for overflow guard
+  - [x] Implement promoted column value extraction from `DecodedAccount.data` JSON
+  - [x] Set `updated_at = NOW()` explicitly on both INSERT and UPDATE paths
 
-- [ ] Task 4: Implement `update_checkpoint` (AC: #4)
-  - [ ] Add private method `async fn update_checkpoint(tx: &mut PgConnection, schema_name: &str, stream: &str, slot: u64, signature: Option<&str>) -> Result<(), StorageError>`
-  - [ ] `INSERT INTO {schema}."_checkpoints" (stream, last_slot, last_signature, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (stream) DO UPDATE SET last_slot = EXCLUDED.last_slot, last_signature = EXCLUDED.last_signature, updated_at = NOW()`
+- [x] Task 4: Implement `update_checkpoint` (AC: #4)
+  - [x] Add private method `async fn update_checkpoint(tx: &mut PgConnection, schema_name: &str, stream: &str, slot: u64, signature: Option<&str>) -> Result<(), StorageError>`
+  - [x] `INSERT INTO {schema}."_checkpoints" (stream, last_slot, last_signature, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (stream) DO UPDATE SET last_slot = EXCLUDED.last_slot, last_signature = EXCLUDED.last_signature, updated_at = NOW()`
 
-- [ ] Task 5: Implement `write_block` atomic transaction (AC: #3)
-  - [ ] Add `pub async fn write_block(&self, schema_name: &str, stream: &str, instructions: &[DecodedInstruction], accounts: &[DecodedAccount], slot: u64, signature: Option<&str>) -> Result<WriteResult, StorageError>`
-  - [ ] Begin transaction: `self.pool.begin().await`
-  - [ ] Call `write_instructions`, `write_accounts`, `update_checkpoint` within the transaction
-  - [ ] Commit on success, return `WriteResult { instructions_written, accounts_written }`
-  - [ ] On failure, transaction auto-rollbacks (Drop), return appropriate StorageError
-  - [ ] Use `Box::pin(async move { ... })` with owned params if needed for Send safety
+- [x] Task 5: Implement `write_block` atomic transaction (AC: #3)
+  - [x] Add `pub async fn write_block(&self, schema_name: &str, stream: &str, instructions: &[DecodedInstruction], accounts: &[DecodedAccount], slot: u64, signature: Option<&str>) -> Result<WriteResult, StorageError>`
+  - [x] Begin transaction: `self.pool.begin().await`
+  - [x] Call `write_instructions`, `write_accounts`, `update_checkpoint` within the transaction
+  - [x] Commit on success, return `WriteResult { instructions_written, accounts_written }`
+  - [x] On failure, transaction auto-rollbacks (Drop), return appropriate StorageError
+  - [x] Use `Box::pin(async move { ... })` with owned params if needed for Send safety
 
-- [ ] Task 6: Implement `read_checkpoint` (AC: #5)
-  - [ ] Add `pub async fn read_checkpoint(&self, schema_name: &str, stream: &str) -> Result<Option<CheckpointInfo>, StorageError>`
-  - [ ] Define `CheckpointInfo { last_slot: u64, last_signature: Option<String> }`
-  - [ ] Query: `SELECT last_slot, last_signature FROM {schema}."_checkpoints" WHERE stream = $1`
-  - [ ] **Note:** `last_slot` is BIGINT (i64) in DB — cast to u64 with `as u64` (safe: Solana slots are well within i64 range)
-  - [ ] Return `None` if no checkpoint row exists (fresh start)
-  - [ ] Map sqlx errors to `StorageError::CheckpointFailed`
+- [x] Task 6: Implement `read_checkpoint` (AC: #5)
+  - [x] Add `pub async fn read_checkpoint(&self, schema_name: &str, stream: &str) -> Result<Option<CheckpointInfo>, StorageError>`
+  - [x] Define `CheckpointInfo { last_slot: u64, last_signature: Option<String> }`
+  - [x] Query: `SELECT last_slot, last_signature FROM {schema}."_checkpoints" WHERE stream = $1`
+  - [x] **Note:** `last_slot` is BIGINT (i64) in DB — cast to u64 with `as u64` (safe: Solana slots are well within i64 range)
+  - [x] Return `None` if no checkpoint row exists (fresh start)
+  - [x] Map sqlx errors to `StorageError::CheckpointFailed`
 
-- [ ] Task 7: Add `WriteResult` and `CheckpointInfo` types (AC: #3, #5)
-  - [ ] Define in `src/storage/writer.rs`:
+- [x] Task 7: Add `WriteResult` and `CheckpointInfo` types (AC: #3, #5)
+  - [x] Define in `src/storage/writer.rs`:
     ```rust
     pub struct WriteResult {
         pub instructions_written: u64,
@@ -110,19 +110,19 @@ so that the pipeline has a reliable, crash-safe persistence layer.
     }
     ```
 
-- [ ] Task 8: Unit tests (AC: all)
-  - [ ] Test `safe_u64_to_i64` — values at i64::MAX boundary, above, below, zero
-  - [ ] Test column vector decomposition — verify correct mapping from DecodedInstruction fields to typed vectors
-  - [ ] Test promoted column extraction from JSON — u8, u64, string, pubkey, bool, Option
-  - [ ] Test u64 overflow handling — value > i64::MAX produces None in promoted, preserved in JSONB
-  - [ ] Test empty input handling — write_block with no instructions and no accounts succeeds
-  - [ ] Test SQL generation — verify generated INSERT...UNNEST SQL strings contain correct schema/table names and ON CONFLICT clauses
+- [x] Task 8: Unit tests (AC: all)
+  - [x] Test `safe_u64_to_i64` — values at i64::MAX boundary, above, below, zero
+  - [x] Test column vector decomposition — verify correct mapping from DecodedInstruction fields to typed vectors
+  - [x] Test promoted column extraction from JSON — u8, u64, string, pubkey, bool, Option
+  - [x] Test u64 overflow handling — value > i64::MAX produces None in promoted, preserved in JSONB
+  - [x] Test empty input handling — write_block with no instructions and no accounts succeeds
+  - [x] Test SQL generation — verify generated INSERT...UNNEST SQL strings contain correct schema/table names and ON CONFLICT clauses
 
-- [ ] Task 9: Verify (AC: all)
-  - [ ] `cargo build` compiles
-  - [ ] `cargo clippy` passes
-  - [ ] `cargo fmt -- --check` passes
-  - [ ] `cargo test` — all tests pass (existing + new)
+- [x] Task 9: Verify (AC: all)
+  - [x] `cargo build` compiles
+  - [x] `cargo clippy` passes
+  - [x] `cargo fmt -- --check` passes
+  - [x] `cargo test` — all tests pass (existing + new)
 
 ## Dev Notes
 
@@ -479,10 +479,26 @@ Integration tests (requiring PostgreSQL) are deferred to Epic 6.
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+No blocking issues encountered. Build compiled on first attempt.
+
 ### Completion Notes List
 
+- Replaced empty `StorageWriter` stub with full implementation (~500 LOC + ~250 LOC tests)
+- `StorageWriter` holds `PgPool` + `Mutex<HashMap>` for promoted column cache — Send+Sync safe
+- `write_block()`: atomic transaction wrapping instructions + accounts + checkpoint. No Box::pin needed — simple `&self` method compiled Send-clean
+- `write_instructions()`: INSERT...UNNEST with 10 column vectors, ON CONFLICT DO NOTHING dedup, `sqlx::types::Json<T>` for JSONB arrays
+- `write_accounts()`: groups by account_type, sanitizes table names, CTE-based UNNEST upsert with slot guard (WHERE EXCLUDED.slot_updated > existing)
+- Promoted column extraction: discovers columns via `information_schema.columns`, builds SQL-side extraction expressions (`data->>'field'`::TYPE), with u64 overflow guard (>i64::MAX → NULL)
+- `update_checkpoint()`: INSERT...ON CONFLICT for per-program `_checkpoints` table
+- `read_checkpoint()`: SELECT with proper NULL handling, maps BIGINT→u64
+- `safe_u64_to_i64()`: utility for Rust-side overflow guard (currently SQL-side via CASE WHEN)
+- 24 unit tests covering: safe_u64_to_i64 boundaries, column decomposition correctness, account grouping, promoted column SQL extraction (bigint overflow, text, boolean, integer, smallint, double precision, numeric, unknown types, single-quote escaping), SQL generation for both instructions and accounts (with/without promoted columns), Send safety compile-time checks
+- All 169 tests pass (24 new + 145 existing), clippy clean, fmt clean
+
 ### File List
+
+- `src/storage/writer.rs` — Rewritten (was empty stub, now full StorageWriter implementation + 24 unit tests)

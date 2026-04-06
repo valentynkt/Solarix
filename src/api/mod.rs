@@ -45,6 +45,9 @@ pub enum ApiError {
     #[error("IDL error: {0}")]
     IdlError(String),
 
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
+
     #[error("storage error: {0}")]
     StorageError(String),
 }
@@ -68,6 +71,7 @@ impl IntoResponse for ApiError {
             ApiError::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())
             }
+            ApiError::InvalidValue(msg) => (StatusCode::BAD_REQUEST, "INVALID_VALUE", msg.clone()),
             ApiError::IdlError(msg) => (StatusCode::UNPROCESSABLE_ENTITY, "IDL_ERROR", msg.clone()),
             ApiError::StorageError(msg) => {
                 error!(error = %msg, "storage error in API handler");
