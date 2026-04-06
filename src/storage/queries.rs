@@ -14,16 +14,14 @@ pub enum QueryTarget {
     Accounts { schema: String, table: String },
 }
 
-/// Build a dynamic SELECT query with filters, ordering, limit, and offset.
+/// Build SELECT + FROM + WHERE portion of a query.
 ///
-/// All user-provided values are bound via `push_bind` — never string-concatenated.
-/// Table and column names are derived from the IDL (not user input) and double-quoted.
-pub fn build_query<'a>(
+/// Returns `(QueryBuilder, has_where)` so the caller can append additional
+/// conditions (e.g. cursor clauses) before calling `append_order_and_limit`.
+pub(crate) fn build_query_base<'a>(
     target: &QueryTarget,
     filters: &[ResolvedFilter],
-    limit: i64,
-    offset: i64,
-) -> QueryBuilder<'a, Postgres> {
+) -> (QueryBuilder<'a, Postgres>, bool) {
     let (qualified_table, select_cols) = match target {
         QueryTarget::Instructions { schema } => (
             format!("{}.{}", quote_ident(schema), quote_ident("_instructions")),
@@ -45,7 +43,16 @@ pub fn build_query<'a>(
         append_filter_clause(&mut qb, filter);
     }
 
-    // ORDER BY
+    (qb, has_where)
+}
+
+/// Append ORDER BY, LIMIT, and optional OFFSET to a query builder.
+pub(crate) fn append_order_and_limit(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    target: &QueryTarget,
+    limit: i64,
+    offset: i64,
+) {
     qb.push(" ORDER BY ");
     match target {
         QueryTarget::Instructions { .. } => {
@@ -56,16 +63,27 @@ pub fn build_query<'a>(
         }
     };
 
-    // LIMIT
     qb.push(" LIMIT ");
     qb.push_bind(limit);
 
-    // OFFSET (only if > 0)
     if offset > 0 {
         qb.push(" OFFSET ");
         qb.push_bind(offset);
     }
+}
 
+/// Build a dynamic SELECT query with filters, ordering, limit, and offset.
+///
+/// All user-provided values are bound via `push_bind` — never string-concatenated.
+/// Table and column names are derived from the IDL (not user input) and double-quoted.
+pub fn build_query<'a>(
+    target: &QueryTarget,
+    filters: &[ResolvedFilter],
+    limit: i64,
+    offset: i64,
+) -> QueryBuilder<'a, Postgres> {
+    let (mut qb, _) = build_query_base(target, filters);
+    append_order_and_limit(&mut qb, target, limit, offset);
     qb
 }
 

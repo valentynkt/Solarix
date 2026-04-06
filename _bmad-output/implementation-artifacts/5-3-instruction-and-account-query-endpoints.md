@@ -1,6 +1,6 @@
 # Story 5.3: Instruction & Account Query Endpoints
 
-Status: review
+Status: done
 
 ## Story
 
@@ -640,9 +640,9 @@ claude-opus-4-6
 
 ### Review Findings
 
-- [ ] [Review][Patch] P1: CRITICAL — Cursor condition injected after ORDER BY/LIMIT produces invalid SQL [handlers.rs:577-593]
-- [ ] [Review][Patch] P2: HIGH — PostgreSQL type cast errors (e.g. slot_gte=abc) return 500 instead of 400 [handlers.rs:598-600]
-- [ ] [Review][Patch] P3: MEDIUM — Negative/zero limit returns 1, spec (AC7) says use default (50) [handlers.rs:417-423]
+- [x] [Review][Patch] P1: CRITICAL — Cursor condition injected after ORDER BY/LIMIT produces invalid SQL [handlers.rs:577-593] — FIXED: split build_query into build_query_base + append_order_and_limit
+- [x] [Review][Patch] P2: HIGH — PostgreSQL type cast errors (e.g. slot_gte=abc) return 500 instead of 400 [handlers.rs:598-600] — FIXED: added map_query_error detecting PG codes 22P02/22003
+- [x] [Review][Patch] P3: MEDIUM — Negative/zero limit returns 1, spec (AC7) says use default (50) [handlers.rs:417-423] — FIXED: treat <= 0 as None → default
 - [x] [Review][Defer] W1: JSONB range comparisons use text ordering, not numeric [queries.rs:134-143] — deferred, pre-existing from story 5.2
 - [x] [Review][Defer] W2: Registry vs DB schema dropped externally yields 500 — deferred, pre-existing architectural
 - [x] [Review][Defer] W3: Cursor key insufficiency (instruction_index not in cursor tuple) — deferred, changes API contract, rare edge case

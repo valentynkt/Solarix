@@ -8,6 +8,14 @@ fn parse_nonzero_usize(s: &str) -> Result<usize, String> {
     Ok(val)
 }
 
+fn parse_nonzero_u64(s: &str) -> Result<u64, String> {
+    let val: u64 = s.parse().map_err(|e| format!("{e}"))?;
+    if val == 0 {
+        return Err("value must be at least 1".to_string());
+    }
+    Ok(val)
+}
+
 /// Solarix universal Solana indexer configuration.
 #[derive(Parser, Debug, Clone)]
 #[command(name = "solarix", about = "Universal Solana indexer")]
@@ -81,14 +89,22 @@ pub struct Config {
     #[arg(long, env = "SOLARIX_RETRY_TIMEOUT_SECS", default_value_t = 300)]
     pub retry_timeout_secs: u64,
 
+    // === Streaming ===
+    #[arg(
+        long,
+        env = "SOLARIX_MAX_CONSECUTIVE_FETCH_FAILURES",
+        default_value_t = 100
+    )]
+    pub max_consecutive_fetch_failures: u64,
+
     // === WebSocket ===
-    #[arg(long, env = "SOLARIX_WS_PING_INTERVAL_SECS", default_value_t = 30)]
+    #[arg(long, env = "SOLARIX_WS_PING_INTERVAL_SECS", default_value_t = 30, value_parser = parse_nonzero_u64)]
     pub ws_ping_interval_secs: u64,
 
-    #[arg(long, env = "SOLARIX_WS_PONG_TIMEOUT_SECS", default_value_t = 10)]
+    #[arg(long, env = "SOLARIX_WS_PONG_TIMEOUT_SECS", default_value_t = 10, value_parser = parse_nonzero_u64)]
     pub ws_pong_timeout_secs: u64,
 
-    #[arg(long, env = "SOLARIX_DEDUP_CACHE_SIZE", default_value_t = 10_000)]
+    #[arg(long, env = "SOLARIX_DEDUP_CACHE_SIZE", default_value_t = 10_000, value_parser = parse_nonzero_usize)]
     pub dedup_cache_size: usize,
 
     // === Logging ===

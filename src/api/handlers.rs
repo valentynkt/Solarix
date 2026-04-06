@@ -21,7 +21,7 @@ use crate::api::filters::{
 };
 use crate::idl::IdlManager;
 use crate::registry::ProgramRegistry;
-use crate::storage::queries::{build_query, QueryTarget};
+use crate::storage::queries::{append_order_and_limit, build_query, build_query_base, QueryTarget};
 use crate::storage::schema::{quote_ident, sanitize_identifier};
 
 use super::{ApiError, AppState};
@@ -77,6 +77,41 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Val
         StatusCode::SERVICE_UNAVAILABLE
     };
 
+    // Per-program status — graceful fallback if query fails
+    let programs = if db_ok {
+        let result = sqlx::query(
+            r#"SELECT p."program_id", p."status" AS program_status,
+                      i."status" AS pipeline_status, i."last_processed_slot",
+                      i."last_heartbeat", i."total_instructions", i."total_accounts"
+               FROM "programs" p
+               LEFT JOIN "indexer_state" i ON p."program_id" = i."program_id""#,
+        )
+        .fetch_all(&state.pool)
+        .await;
+
+        match result {
+            Ok(rows) => Some(
+                rows.iter()
+                    .map(|row| {
+                        let heartbeat: Option<chrono::DateTime<chrono::Utc>> =
+                            row.get("last_heartbeat");
+                        json!({
+                            "program_id": row.get::<String, _>("program_id"),
+                            "status": row.get::<Option<String>, _>("pipeline_status"),
+                            "last_processed_slot": row.get::<Option<i64>, _>("last_processed_slot"),
+                            "last_heartbeat": heartbeat.map(|t| t.to_rfc3339()),
+                            "total_instructions": row.get::<Option<i64>, _>("total_instructions").unwrap_or(0),
+                            "total_accounts": row.get::<Option<i64>, _>("total_accounts").unwrap_or(0),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     (
         http_status,
         Json(json!({
@@ -84,6 +119,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Val
             "database": db_status,
             "uptime_seconds": uptime,
             "version": version,
+            "programs": programs,
         })),
     )
 }
@@ -418,7 +454,13 @@ fn clamp_limit(params: &HashMap<String, String>, config: &crate::config::Config)
     params
         .get("limit")
         .and_then(|v| v.parse::<i64>().ok())
-        .map(|v| v.clamp(1, config.api_max_page_size as i64))
+        .and_then(|v| {
+            if v <= 0 {
+                None // treat zero/negative as missing → use default
+            } else {
+                Some(v.min(config.api_max_page_size as i64))
+            }
+        })
         .unwrap_or(config.api_default_page_size as i64)
 }
 
@@ -452,6 +494,22 @@ fn decode_cursor(cursor: &str) -> Result<(i64, String), ApiError> {
 // ---------------------------------------------------------------------------
 // Shared query helpers
 // ---------------------------------------------------------------------------
+
+/// Map sqlx errors to ApiError, detecting PostgreSQL type cast failures (22P02, 22003)
+/// and returning 400 InvalidValue instead of 500 QueryFailed.
+fn map_query_error(e: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(ref db_err) = e {
+        if let Some(code) = db_err.code() {
+            if code == "22P02" || code == "22003" {
+                return ApiError::InvalidValue(format!(
+                    "filter value type mismatch: {}",
+                    db_err.message()
+                ));
+            }
+        }
+    }
+    ApiError::QueryFailed(e.to_string())
+}
 
 async fn get_schema_name(pool: &sqlx::PgPool, program_id: &str) -> Result<String, ApiError> {
     let row = sqlx::query(r#"SELECT "schema_name" FROM "programs" WHERE "program_id" = $1"#)
@@ -572,16 +630,14 @@ pub async fn query_instructions(
         schema: schema_name,
     };
 
-    // Build query, fetch limit + 1 for has_more detection
+    // Build query base (SELECT + FROM + WHERE), then inject cursor before ORDER BY/LIMIT
     let fetch_limit = limit + 1;
-    let mut qb = build_query(&target, &resolved, fetch_limit, 0);
+    let (mut qb, _) = build_query_base(&target, &resolved);
 
-    // Inject cursor condition if present
-    // Cursor is (slot, signature) DESC order: WHERE (slot, signature) < (cursor_slot, cursor_sig)
-    // Since build_query already emits WHERE if filters exist, we need to append AND
+    // Inject cursor condition before ORDER BY/LIMIT
     if let Some(ref cursor) = cursor_param {
         let (cursor_slot, cursor_sig) = decode_cursor(cursor)?;
-        // The query already has WHERE clause from instruction_name filter
+        // instruction_name filter ensures WHERE exists, so AND is safe
         qb.push(" AND (");
         qb.push(r#""slot" < "#);
         qb.push_bind(cursor_slot);
@@ -592,12 +648,14 @@ pub async fn query_instructions(
         qb.push("))");
     }
 
+    append_order_and_limit(&mut qb, &target, fetch_limit, 0);
+
     let start = std::time::Instant::now();
     let rows = qb
         .build()
         .fetch_all(&state.pool)
         .await
-        .map_err(|e| ApiError::QueryFailed(e.to_string()))?;
+        .map_err(map_query_error)?;
     let query_time_ms = start.elapsed().as_millis() as u64;
 
     let has_more = rows.len() as i64 > limit;
@@ -709,13 +767,13 @@ pub async fn query_accounts(
             qb.build()
                 .fetch_all(&state.pool)
                 .await
-                .map_err(|e| ApiError::QueryFailed(e.to_string()))
+                .map_err(map_query_error)
         },
         async {
             let row = sqlx::query(&count_sql)
                 .fetch_one(&state.pool)
                 .await
-                .map_err(|e| ApiError::QueryFailed(e.to_string()))?;
+                .map_err(map_query_error)?;
             Ok::<i64, ApiError>(row.get("count"))
         }
     )?;
@@ -777,11 +835,202 @@ pub async fn get_account(
         .bind(&pubkey)
         .fetch_optional(&state.pool)
         .await
-        .map_err(|e| ApiError::QueryFailed(e.to_string()))?
+        .map_err(map_query_error)?
         .ok_or_else(|| ApiError::AccountNotFound(pubkey.clone()))?;
 
     let data = account_row_to_json(&row);
     Ok(Json(json!({ "data": data })))
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation & statistics handlers (Story 5.4)
+// ---------------------------------------------------------------------------
+
+const VALID_INTERVALS: &[&str] = &["minute", "hour", "day", "week", "month"];
+
+fn validate_interval(params: &HashMap<String, String>) -> Result<&'static str, ApiError> {
+    let raw = params
+        .get("interval")
+        .ok_or_else(|| ApiError::InvalidValue("'interval' parameter is required".to_string()))?;
+    VALID_INTERVALS
+        .iter()
+        .find(|&&v| v == raw.as_str())
+        .copied()
+        .ok_or_else(|| {
+            ApiError::InvalidValue(format!(
+                "invalid interval '{}'. Must be one of: minute, hour, day, week, month",
+                raw
+            ))
+        })
+}
+
+fn parse_optional_i64(
+    params: &HashMap<String, String>,
+    key: &str,
+) -> Result<Option<i64>, ApiError> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(v) => v.parse::<i64>().map(Some).map_err(|_| {
+            ApiError::InvalidValue(format!("'{}' must be a Unix timestamp integer", key))
+        }),
+    }
+}
+
+pub async fn instruction_count(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
+    // Validate instruction name exists in IDL
+    {
+        let registry = state.registry.read().await;
+        let idl = registry
+            .get_idl(&id)
+            .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
+        if !idl.instructions.iter().any(|i| i.name == name) {
+            return Err(ApiError::InstructionNotFound(name.clone()));
+        }
+    }
+
+    let interval = validate_interval(&params)?;
+    let from = parse_optional_i64(&params, "from")?;
+    let to = parse_optional_i64(&params, "to")?;
+
+    let schema_name = get_schema_name(&state.pool, &id).await?;
+
+    let mut qb = sqlx::QueryBuilder::new("SELECT date_trunc(");
+    qb.push_bind(interval.to_string());
+    qb.push(", to_timestamp(\"block_time\")) AS bucket, COUNT(*) AS count FROM ");
+    qb.push(format!(
+        "{}.{}",
+        quote_ident(&schema_name),
+        quote_ident("_instructions")
+    ));
+    qb.push(" WHERE \"instruction_name\" = ");
+    qb.push_bind(name.clone());
+    qb.push(" AND \"block_time\" IS NOT NULL");
+
+    if let Some(from_val) = from {
+        qb.push(" AND \"block_time\" >= ");
+        qb.push_bind(from_val);
+    }
+    if let Some(to_val) = to {
+        qb.push(" AND \"block_time\" <= ");
+        qb.push_bind(to_val);
+    }
+
+    qb.push(" GROUP BY bucket ORDER BY bucket ASC");
+
+    let start = std::time::Instant::now();
+    let rows = qb
+        .build()
+        .fetch_all(&state.pool)
+        .await
+        .map_err(map_query_error)?;
+    let query_time_ms = start.elapsed().as_millis() as u64;
+
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let bucket: chrono::DateTime<chrono::Utc> = row.get("bucket");
+            let count: i64 = row.get("count");
+            json!({ "bucket": bucket.to_rfc3339(), "count": count })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "data": data,
+        "meta": {
+            "program_id": id,
+            "instruction": name,
+            "interval": interval,
+            "query_time_ms": query_time_ms,
+        }
+    })))
+}
+
+pub async fn program_stats(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
+    let schema_name = get_schema_name(&state.pool, &id).await?;
+
+    let start = std::time::Instant::now();
+
+    // Query indexer_state for pre-computed totals + _instructions for aggregates
+    let (state_row, ix_rows) = tokio::try_join!(
+        async {
+            sqlx::query(
+                r#"SELECT "total_instructions", "total_accounts"
+                   FROM "indexer_state" WHERE "program_id" = $1"#,
+            )
+            .bind(&id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(map_query_error)
+        },
+        async {
+            let sql = format!(
+                r#"SELECT MIN("slot") AS first_seen_slot, MAX("slot") AS last_seen_slot,
+                          "instruction_name", COUNT(*) AS count
+                   FROM {}.{} GROUP BY "instruction_name""#,
+                quote_ident(&schema_name),
+                quote_ident("_instructions")
+            );
+            sqlx::query(&sql)
+                .fetch_all(&state.pool)
+                .await
+                .map_err(map_query_error)
+        }
+    )?;
+
+    let query_time_ms = start.elapsed().as_millis() as u64;
+
+    let (total_instructions, total_accounts) = match state_row {
+        Some(row) => {
+            let ti: i64 = row.get("total_instructions");
+            let ta: i64 = row.get("total_accounts");
+            (ti, ta)
+        }
+        None => return Err(ApiError::ProgramNotFound(id)),
+    };
+
+    let mut first_seen_slot: Option<i64> = None;
+    let mut last_seen_slot: Option<i64> = None;
+    let mut instruction_counts = serde_json::Map::new();
+
+    for row in &ix_rows {
+        let row_first: Option<i64> = row.get("first_seen_slot");
+        let row_last: Option<i64> = row.get("last_seen_slot");
+        let ix_name: String = row.get("instruction_name");
+        let count: i64 = row.get("count");
+
+        if let Some(f) = row_first {
+            first_seen_slot = Some(first_seen_slot.map_or(f, |cur: i64| cur.min(f)));
+        }
+        if let Some(l) = row_last {
+            last_seen_slot = Some(last_seen_slot.map_or(l, |cur: i64| cur.max(l)));
+        }
+        instruction_counts.insert(ix_name, Value::Number(count.into()));
+    }
+
+    Ok(Json(json!({
+        "data": {
+            "total_instructions": total_instructions,
+            "total_accounts": total_accounts,
+            "first_seen_slot": first_seen_slot,
+            "last_seen_slot": last_seen_slot,
+            "instruction_counts": Value::Object(instruction_counts),
+        },
+        "meta": {
+            "program_id": id,
+            "query_time_ms": query_time_ms,
+        }
+    })))
 }
 
 #[cfg(test)]
@@ -947,6 +1196,7 @@ mod tests {
             retry_initial_ms: 500,
             retry_max_ms: 30_000,
             retry_timeout_secs: 300,
+            max_consecutive_fetch_failures: 100,
             ws_ping_interval_secs: 30,
             ws_pong_timeout_secs: 10,
             dedup_cache_size: 10_000,
@@ -983,16 +1233,15 @@ mod tests {
         let config = make_config();
         let mut params = HashMap::new();
         params.insert("limit".to_string(), "-5".to_string());
-        // -5 clamped to 1 (minimum)
-        assert_eq!(clamp_limit(&params, &config), 1);
+        assert_eq!(clamp_limit(&params, &config), 50);
     }
 
     #[test]
-    fn clamp_limit_zero_clamped_to_one() {
+    fn clamp_limit_zero_uses_default() {
         let config = make_config();
         let mut params = HashMap::new();
         params.insert("limit".to_string(), "0".to_string());
-        assert_eq!(clamp_limit(&params, &config), 1);
+        assert_eq!(clamp_limit(&params, &config), 50);
     }
 
     #[test]
@@ -1136,5 +1385,108 @@ mod tests {
         let types = vec![];
         let result = get_account_fields("Nonexistent", &types);
         assert!(result.is_err());
+    }
+
+    // --- Story 5.4: Interval validation ---
+
+    #[test]
+    fn validate_interval_accepts_all_valid_values() {
+        for &v in VALID_INTERVALS {
+            let mut params = HashMap::new();
+            params.insert("interval".to_string(), v.to_string());
+            let result = validate_interval(&params);
+            assert!(result.is_ok(), "expected '{}' to be valid", v);
+            assert_eq!(result.unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn validate_interval_rejects_missing() {
+        let params = HashMap::new();
+        let result = validate_interval(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ApiError::InvalidValue(msg) => assert!(msg.contains("required")),
+            other => panic!("expected InvalidValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_interval_rejects_invalid_value() {
+        let mut params = HashMap::new();
+        params.insert("interval".to_string(), "year".to_string());
+        let result = validate_interval(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ApiError::InvalidValue(msg) => {
+                assert!(msg.contains("year"));
+                assert!(msg.contains("Must be one of"));
+            }
+            other => panic!("expected InvalidValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_interval_rejects_sql_injection_attempt() {
+        let mut params = HashMap::new();
+        params.insert("interval".to_string(), "day'; DROP TABLE --".to_string());
+        assert!(validate_interval(&params).is_err());
+    }
+
+    // --- Story 5.4: from/to parsing ---
+
+    #[test]
+    fn parse_optional_i64_returns_none_when_missing() {
+        let params = HashMap::new();
+        assert_eq!(parse_optional_i64(&params, "from").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_optional_i64_parses_valid_value() {
+        let mut params = HashMap::new();
+        params.insert("from".to_string(), "1712448000".to_string());
+        assert_eq!(
+            parse_optional_i64(&params, "from").unwrap(),
+            Some(1712448000)
+        );
+    }
+
+    #[test]
+    fn parse_optional_i64_parses_negative_value() {
+        let mut params = HashMap::new();
+        params.insert("from".to_string(), "-100".to_string());
+        assert_eq!(parse_optional_i64(&params, "from").unwrap(), Some(-100));
+    }
+
+    #[test]
+    fn parse_optional_i64_rejects_non_numeric() {
+        let mut params = HashMap::new();
+        params.insert("from".to_string(), "abc".to_string());
+        let result = parse_optional_i64(&params, "from");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ApiError::InvalidValue(msg) => {
+                assert!(msg.contains("from"));
+                assert!(msg.contains("Unix timestamp"));
+            }
+            other => panic!("expected InvalidValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_optional_i64_rejects_float() {
+        let mut params = HashMap::new();
+        params.insert("to".to_string(), "1712448000.5".to_string());
+        let result = parse_optional_i64(&params, "to");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn api_error_invalid_value_returns_400() {
+        let err = ApiError::InvalidValue("bad interval".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "INVALID_VALUE");
     }
 }

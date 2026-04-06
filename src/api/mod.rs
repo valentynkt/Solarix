@@ -165,6 +165,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/{id}/instructions/{name}",
             get(handlers::query_instructions),
         )
+        .route(
+            "/{id}/instructions/{name}/count",
+            get(handlers::instruction_count),
+        )
+        .route("/{id}/stats", get(handlers::program_stats))
         .route("/{id}/accounts", get(handlers::list_account_types))
         .route("/{id}/accounts/{type}", get(handlers::query_accounts))
         .route("/{id}/accounts/{type}/{pubkey}", get(handlers::get_account));

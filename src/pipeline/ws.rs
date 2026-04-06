@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // internal crate
 use super::PipelineError;
@@ -68,6 +68,10 @@ impl DeduplicationSet {
 
     pub fn len(&self) -> usize {
         self.seen.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
     }
 }
 
@@ -232,7 +236,11 @@ impl TransactionStream for WsTransactionStream {
                     }
 
                     if let Some(result) = response.result {
-                        self.subscription_id = result.as_u64();
+                        self.subscription_id = Some(result.as_u64().ok_or_else(|| {
+                            PipelineError::WebSocketDisconnect(format!(
+                                "logsSubscribe returned non-u64 subscription ID: {result}"
+                            ))
+                        })?);
                         break;
                     }
                 }
@@ -293,7 +301,6 @@ impl TransactionStream for WsTransactionStream {
             match received {
                 Received::Message(Ok(msg)) => {
                     self.last_message_time = Instant::now();
-                    self.pending_ping = false;
 
                     match msg {
                         Message::Text(text) => {
@@ -306,7 +313,10 @@ impl TransactionStream for WsTransactionStream {
                                 None => continue,
                             }
                         }
-                        Message::Pong(_) => continue,
+                        Message::Pong(_) => {
+                            self.pending_ping = false;
+                            continue;
+                        }
                         Message::Ping(data) => {
                             let ws = self.ws_stream.as_mut().ok_or_else(|| {
                                 PipelineError::WebSocketDisconnect("not connected".into())
@@ -405,10 +415,7 @@ fn parse_logs_notification(
     let notification: LogsNotification = match serde_json::from_str(text) {
         Ok(n) => n,
         Err(_) => {
-            debug!(
-                text_len = text.len(),
-                "non-notification WS message, skipping"
-            );
+            warn!(text_len = text.len(), "malformed WS message, skipping");
             return None;
         }
     };

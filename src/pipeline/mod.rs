@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::decoder::{is_high_failure_rate, DecodeError, SolarixDecoder};
 use crate::idl::IdlError;
-use crate::pipeline::rpc::{BlockSource, RpcBlock, RpcClient};
+use crate::pipeline::rpc::{BlockSource, RpcBlock, RpcClient, RpcTransaction};
 use crate::storage::writer::StorageWriter;
 use crate::storage::StorageError;
 use crate::types::{DecodedAccount, DecodedInstruction};
@@ -65,6 +65,18 @@ impl PipelineError {
                 | Self::Idl(IdlError::FetchFailed { .. })
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// StreamInterrupt — internal signal for streaming loop control flow
+// ---------------------------------------------------------------------------
+
+/// Distinguishes recoverable disconnects from fatal errors in the streaming loop.
+enum StreamInterrupt {
+    /// WebSocket disconnected; last known slot provided for gap detection.
+    Disconnect(u64),
+    /// Unrecoverable error; pipeline should stop.
+    Fatal(PipelineError),
 }
 
 // ---------------------------------------------------------------------------
@@ -385,25 +397,60 @@ impl PipelineOrchestrator {
         Ok(())
     }
 
-    /// Decode all matching instructions from a block for the target program.
-    fn decode_block(
+    /// Decode matching instructions from a single transaction for the target program.
+    fn decode_transaction(
         &self,
         program_id: &str,
-        block: &RpcBlock,
+        tx: &RpcTransaction,
         idl: &Idl,
-    ) -> Vec<DecodedInstruction> {
+    ) -> (Vec<DecodedInstruction>, usize, usize) {
         let mut decoded = Vec::new();
         let mut decode_failures = 0usize;
         let mut decode_attempts = 0usize;
 
-        for tx in &block.transactions {
-            // Skip failed transactions unless configured otherwise
-            if !self.config.index_failed_txs && !tx.success {
+        // Skip failed transactions unless configured otherwise
+        if !self.config.index_failed_txs && !tx.success {
+            return (decoded, decode_failures, decode_attempts);
+        }
+
+        // Decode top-level instructions
+        for (ix_index, ix) in tx.instructions.iter().enumerate() {
+            if !instruction_targets_program(ix.program_id_index, &tx.account_keys, program_id) {
                 continue;
             }
 
-            // Decode top-level instructions
-            for (ix_index, ix) in tx.instructions.iter().enumerate() {
+            decode_attempts += 1;
+            match self.decoder.decode_instruction(program_id, &ix.data, idl) {
+                Ok(mut di) => {
+                    enrich_instruction(
+                        &mut di,
+                        &tx.signature,
+                        tx.slot,
+                        None, // block_time not available at tx level; caller sets if needed
+                        ix_index as u8,
+                        None,
+                        &ix.accounts,
+                        &tx.account_keys,
+                        program_id,
+                    );
+                    decoded.push(di);
+                }
+                Err(e) => {
+                    decode_failures += 1;
+                    warn!(
+                        slot = tx.slot,
+                        signature = %tx.signature,
+                        ix_index,
+                        error = %e,
+                        "instruction decode failed, skipping"
+                    );
+                }
+            }
+        }
+
+        // Decode inner instructions (CPI)
+        for group in &tx.inner_instructions {
+            for (inner_idx, ix) in group.instructions.iter().enumerate() {
                 if !instruction_targets_program(ix.program_id_index, &tx.account_keys, program_id) {
                     continue;
                 }
@@ -414,10 +461,10 @@ impl PipelineOrchestrator {
                         enrich_instruction(
                             &mut di,
                             &tx.signature,
-                            block.slot,
-                            block.block_time,
-                            ix_index as u8,
+                            tx.slot,
                             None,
+                            group.index,
+                            Some(inner_idx as u8),
                             &ix.accounts,
                             &tx.account_keys,
                             program_id,
@@ -427,69 +474,55 @@ impl PipelineOrchestrator {
                     Err(e) => {
                         decode_failures += 1;
                         warn!(
-                            slot = block.slot,
+                            slot = tx.slot,
                             signature = %tx.signature,
-                            ix_index,
+                            parent_ix = group.index,
+                            inner_idx,
                             error = %e,
-                            "instruction decode failed, skipping"
+                            "inner instruction decode failed, skipping"
                         );
                     }
                 }
             }
-
-            // Decode inner instructions (CPI)
-            for group in &tx.inner_instructions {
-                for (inner_idx, ix) in group.instructions.iter().enumerate() {
-                    if !instruction_targets_program(
-                        ix.program_id_index,
-                        &tx.account_keys,
-                        program_id,
-                    ) {
-                        continue;
-                    }
-
-                    decode_attempts += 1;
-                    match self.decoder.decode_instruction(program_id, &ix.data, idl) {
-                        Ok(mut di) => {
-                            enrich_instruction(
-                                &mut di,
-                                &tx.signature,
-                                block.slot,
-                                block.block_time,
-                                group.index,
-                                Some(inner_idx as u8),
-                                &ix.accounts,
-                                &tx.account_keys,
-                                program_id,
-                            );
-                            decoded.push(di);
-                        }
-                        Err(e) => {
-                            decode_failures += 1;
-                            warn!(
-                                slot = block.slot,
-                                signature = %tx.signature,
-                                parent_ix = group.index,
-                                inner_idx,
-                                error = %e,
-                                "inner instruction decode failed, skipping"
-                            );
-                        }
-                    }
-                }
-            }
         }
 
-        if is_high_failure_rate(decode_failures, decode_attempts) {
+        (decoded, decode_failures, decode_attempts)
+    }
+
+    /// Decode all matching instructions from a block for the target program.
+    fn decode_block(
+        &self,
+        program_id: &str,
+        block: &RpcBlock,
+        idl: &Idl,
+    ) -> Vec<DecodedInstruction> {
+        let mut all_decoded = Vec::new();
+        let mut total_failures = 0usize;
+        let mut total_attempts = 0usize;
+
+        for tx in &block.transactions {
+            let (mut decoded, failures, attempts) = self.decode_transaction(program_id, tx, idl);
+
+            // Set block_time from block context (decode_transaction leaves it as None)
+            for di in &mut decoded {
+                di.block_time = block.block_time;
+            }
+
+            all_decoded.append(&mut decoded);
+            total_failures += failures;
+            total_attempts += attempts;
+        }
+
+        if is_high_failure_rate(total_failures, total_attempts) {
             error!(
                 slot = block.slot,
-                failures = decode_failures,
-                attempts = decode_attempts,
+                failures = total_failures,
+                attempts = total_attempts,
                 "high decode failure rate (>90%) — likely IDL mismatch"
             );
         }
 
-        decoded
+        all_decoded
     }
 
     /// Run account snapshot for a registered program.
@@ -571,6 +604,313 @@ impl PipelineOrchestrator {
         );
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming pipeline
+    // -----------------------------------------------------------------------
+
+    /// Run the streaming pipeline for a registered program.
+    ///
+    /// This is the main streaming entry point. It creates a WebSocket connection,
+    /// processes events, and automatically handles disconnects with gap detection
+    /// and mini-backfill before resuming.
+    pub async fn run_streaming(
+        &self,
+        program_id: &str,
+        schema_name: &str,
+        idl: &Idl,
+    ) -> Result<(), PipelineError> {
+        use crate::pipeline::ws::{TransactionStream, WsTransactionStream};
+        use backon::{ExponentialBuilder, Retryable};
+
+        loop {
+            if self.cancel.is_cancelled() {
+                return Ok(());
+            }
+
+            // Create + subscribe WS
+            let mut stream = WsTransactionStream::new(&self.config);
+            stream.subscribe(program_id).await?;
+            update_indexer_state(&self.pool, program_id, "streaming", None).await?;
+
+            // Streaming loop — returns disconnect slot or clean exit
+            let disconnect_slot = match self
+                .stream_events(&mut stream, program_id, schema_name, idl)
+                .await
+            {
+                Ok(()) => return Ok(()), // clean exit (cancelled)
+                Err(StreamInterrupt::Disconnect(slot)) => slot,
+                Err(StreamInterrupt::Fatal(e)) => return Err(e),
+            };
+
+            // CatchingUp
+            warn!(
+                disconnect_slot,
+                "WebSocket disconnected, entering CatchingUp"
+            );
+            if let Err(e) =
+                update_indexer_state(&self.pool, program_id, "catching_up", Some(disconnect_slot))
+                    .await
+            {
+                warn!(error = %e, "failed to set indexer_state to catching_up");
+            }
+
+            // Reconnect with backon retry
+            let reconnect_result: Result<WsTransactionStream, PipelineError> = (|| async {
+                let mut new_stream = WsTransactionStream::new(&self.config);
+                new_stream.subscribe(program_id).await?;
+                Ok(new_stream)
+            })
+            .retry(
+                ExponentialBuilder::default()
+                    .with_min_delay(Duration::from_millis(self.config.retry_initial_ms))
+                    .with_max_delay(Duration::from_millis(self.config.retry_max_ms))
+                    .with_total_delay(Some(Duration::from_secs(self.config.retry_timeout_secs)))
+                    .with_factor(2.0)
+                    .with_jitter()
+                    .without_max_times(),
+            )
+            .when(|e: &PipelineError| e.is_retryable())
+            .notify(|err: &PipelineError, dur: Duration| {
+                warn!(error = %err, delay = ?dur, "retrying WebSocket reconnection");
+            })
+            .await;
+
+            match reconnect_result {
+                Ok(_new_stream) => {
+                    // Mini-backfill: fill the gap between disconnect and current tip
+                    self.mini_backfill(program_id, schema_name, idl, disconnect_slot)
+                        .await?;
+                    // Loop back to create a fresh stream for the Streaming state
+                }
+                Err(e) => {
+                    error!(error = %e, "WebSocket reconnection failed after retry timeout");
+                    if let Err(update_err) =
+                        update_indexer_state(&self.pool, program_id, "error", None).await
+                    {
+                        warn!(error = %update_err, "failed to set indexer_state to error");
+                    }
+                    return Err(PipelineError::Fatal(format!(
+                        "max reconnection time exceeded: {e}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Process streaming events until disconnect or cancellation.
+    async fn stream_events(
+        &self,
+        stream: &mut dyn crate::pipeline::ws::TransactionStream,
+        program_id: &str,
+        schema_name: &str,
+        idl: &Idl,
+    ) -> Result<(), StreamInterrupt> {
+        let mut consecutive_failures: u64 = 0;
+        let mut last_heartbeat_at = Instant::now();
+        let mut txs_processed: u64 = 0;
+
+        loop {
+            if self.cancel.is_cancelled() {
+                return Ok(());
+            }
+
+            let event = match stream.next().await {
+                Ok(Some(event)) => event,
+                Ok(None) => continue, // no event (shouldn't happen but handle gracefully)
+                Err(PipelineError::WebSocketDisconnect(reason)) => {
+                    let slot = stream.last_seen_slot().unwrap_or(0);
+                    // Try to get a better slot from checkpoint if stream has no slot
+                    let disconnect_slot = if slot == 0 {
+                        match self.writer.read_checkpoint(schema_name, "realtime").await {
+                            Ok(Some(cp)) => cp.last_slot,
+                            _ => 0,
+                        }
+                    } else {
+                        slot
+                    };
+                    warn!(
+                        disconnect_slot,
+                        reason = %reason,
+                        txs_processed,
+                        "WebSocket disconnected"
+                    );
+                    return Err(StreamInterrupt::Disconnect(disconnect_slot));
+                }
+                Err(e) => return Err(StreamInterrupt::Fatal(e)),
+            };
+
+            // Skip failed txs if configured
+            if event.error.is_some() && !self.config.index_failed_txs {
+                debug!(signature = %event.signature, "skipping failed tx");
+                continue;
+            }
+
+            // Fetch full transaction
+            let tx = match self.rpc.get_transaction(&event.signature).await {
+                Ok(Some(tx)) => {
+                    consecutive_failures = 0;
+                    tx
+                }
+                Ok(None) => {
+                    warn!(
+                        signature = %event.signature,
+                        slot = event.slot,
+                        "transaction not found (not yet finalized?), skipping"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures > self.config.max_consecutive_fetch_failures {
+                        return Err(StreamInterrupt::Fatal(PipelineError::Fatal(format!(
+                            "exceeded {} consecutive getTransaction failures: {e}",
+                            self.config.max_consecutive_fetch_failures
+                        ))));
+                    }
+                    warn!(
+                        signature = %event.signature,
+                        consecutive_failures,
+                        error = %e,
+                        "getTransaction failed, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            // Decode + enrich
+            let (instructions, _failures, _attempts) =
+                self.decode_transaction(program_id, &tx, idl);
+
+            // Write
+            if !instructions.is_empty() {
+                self.writer
+                    .write_block(
+                        schema_name,
+                        "realtime",
+                        &instructions,
+                        &[],
+                        event.slot,
+                        Some(&event.signature),
+                    )
+                    .await
+                    .map_err(|e| StreamInterrupt::Fatal(PipelineError::Storage(e)))?;
+            }
+
+            txs_processed += 1;
+
+            // Heartbeat
+            if last_heartbeat_at.elapsed()
+                >= Duration::from_secs(self.config.checkpoint_interval_secs)
+            {
+                if let Err(e) =
+                    update_indexer_state(&self.pool, program_id, "streaming", Some(event.slot))
+                        .await
+                {
+                    warn!(error = %e, "heartbeat update failed");
+                }
+                debug!(
+                    txs_processed,
+                    current_slot = event.slot,
+                    "streaming heartbeat"
+                );
+                last_heartbeat_at = Instant::now();
+            }
+        }
+    }
+
+    /// Run a mini-backfill to fill the gap between disconnect_slot and chain tip.
+    async fn mini_backfill(
+        &self,
+        program_id: &str,
+        schema_name: &str,
+        idl: &Idl,
+        disconnect_slot: u64,
+    ) -> Result<(), PipelineError> {
+        let chain_tip = self.rpc.get_slot().await?;
+        let gap_start = disconnect_slot.saturating_add(1);
+
+        if gap_start > chain_tip {
+            info!(disconnect_slot, chain_tip, "no gap to backfill");
+            return Ok(());
+        }
+
+        let gap_size = chain_tip - gap_start + 1;
+        info!(
+            gap_start,
+            chain_tip,
+            gap = gap_size,
+            "mini-backfill starting"
+        );
+
+        let chunks = compute_backfill_chunks(gap_start, chain_tip, self.config.backfill_chunk_size);
+
+        let (tx, rx) = mpsc::channel::<WriteBatch>(self.config.channel_capacity);
+        let writer = Arc::clone(&self.writer);
+        let pool_clone = self.pool.clone();
+        let program_id_owned = program_id.to_string();
+        let cancel_clone = self.cancel.clone();
+
+        let writer_handle = tokio::spawn(async move {
+            writer_task(rx, writer, &pool_clone, &program_id_owned, cancel_clone).await
+        });
+
+        let mut progress = BackfillProgress::new(gap_start, chain_tip);
+
+        let mut backfill_result = Ok(());
+        for (chunk_start, chunk_end) in &chunks {
+            if self.cancel.is_cancelled() {
+                info!("mini-backfill cancelled");
+                break;
+            }
+
+            // Use "catchup" stream name for mini-backfill checkpoint tracking
+            match self
+                .process_chunk(
+                    program_id,
+                    schema_name,
+                    idl,
+                    *chunk_start,
+                    *chunk_end,
+                    &tx,
+                    &mut progress,
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    error!(error = %e, chunk_start, chunk_end, "mini-backfill chunk failed");
+                    backfill_result = Err(e);
+                    break;
+                }
+            }
+        }
+
+        drop(tx);
+
+        match writer_handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = %e, "mini-backfill writer task failed");
+                if backfill_result.is_ok() {
+                    backfill_result = Err(e);
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "mini-backfill writer task panicked");
+                if backfill_result.is_ok() {
+                    backfill_result =
+                        Err(PipelineError::Fatal(format!("writer task panicked: {e}")));
+                }
+            }
+        }
+
+        if backfill_result.is_ok() {
+            info!(gap_start, chain_tip, "mini-backfill complete");
+        }
+
+        backfill_result
     }
 }
 
