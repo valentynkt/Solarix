@@ -119,3 +119,9 @@ these as known technical debt; stories still in-progress have blocking items not
 - **Non-atomic slot+accounts fetch in `run_account_snapshot`** — `src/pipeline/mod.rs:513-515`. `get_slot()` and `get_multiple_accounts()` called separately; accounts may be at newer slot than recorded `current_slot`. Fundamental RPC limitation, no fix without major redesign.
 - **`u64 as i64` cast in `update_indexer_state` without overflow guard** — `src/pipeline/mod.rs:735`. Solana slots ~300M, well within i64::MAX. `safe_u64_to_i64()` exists in `writer.rs` but is unused. Consistency concern only; revisit if Solana slots approach i64::MAX.
 - **`process_chunk` skips failed blocks without skip counter** — `src/pipeline/mod.rs:348-351`. Story spec says "increment skip counter" but no counter exists. Gap detection is story 4.2 scope; skip counter can be added there.
+
+## Deferred from: code review of 5-3-instruction-and-account-query-endpoints (2026-04-06)
+
+- **JSONB range comparisons use text ordering, not numeric** — `src/storage/queries.rs:134-143`. `("data"->>'field') > $1` compares as TEXT, so `"10" < "9"`. Pre-existing from story 5.2 query builder. Fix requires casting to numeric in SQL.
+- **Registry vs DB schema dropped externally yields generic 500** — `src/api/handlers.rs`. If schema is dropped by external DBA action, registry check passes but data queries fail with `QueryFailed`. Pre-existing architectural issue; no simple fix without schema existence checks.
+- **Cursor key insufficiency (instruction_index not in cursor tuple)** — `src/api/handlers.rs:585-593`. Cursor uses `(slot, signature)` but multiple instructions in the same transaction can share this key. Could cause skipped/duplicated rows at page boundaries. Changes API contract; extremely rare (same-name ixs in one tx). Defer to post-MVP.

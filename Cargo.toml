@@ -43,6 +43,9 @@ solana-pubkey = { version = "2", features = ["curve25519"] }
 # solana-pubsub-client = "3"
 # Async trait for object-safe trait boundaries
 async-trait = "0.1"
+# WebSocket
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
 # Encoding & compression
 sha2 = "0.10"
 bs58 = "0.5"

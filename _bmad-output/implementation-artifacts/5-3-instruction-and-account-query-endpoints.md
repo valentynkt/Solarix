@@ -638,6 +638,15 @@ claude-opus-4-6
 - 69 new lines of tests: cursor roundtrip, clamp_limit (6 edge cases), clamp_offset (4 edge cases), 3 new ApiError variant tests, get_account_fields helper test
 - Total: 214 tests pass, 3 ignored, clippy clean, fmt clean
 
+### Review Findings
+
+- [ ] [Review][Patch] P1: CRITICAL — Cursor condition injected after ORDER BY/LIMIT produces invalid SQL [handlers.rs:577-593]
+- [ ] [Review][Patch] P2: HIGH — PostgreSQL type cast errors (e.g. slot_gte=abc) return 500 instead of 400 [handlers.rs:598-600]
+- [ ] [Review][Patch] P3: MEDIUM — Negative/zero limit returns 1, spec (AC7) says use default (50) [handlers.rs:417-423]
+- [x] [Review][Defer] W1: JSONB range comparisons use text ordering, not numeric [queries.rs:134-143] — deferred, pre-existing from story 5.2
+- [x] [Review][Defer] W2: Registry vs DB schema dropped externally yields 500 — deferred, pre-existing architectural
+- [x] [Review][Defer] W3: Cursor key insufficiency (instruction_index not in cursor tuple) — deferred, changes API contract, rare edge case
+
 ### Change Log
 
 - 2026-04-06: Story 5.3 implementation complete — 6 query handlers, pagination, 3 error variants, 19 new tests

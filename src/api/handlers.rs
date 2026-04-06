@@ -947,6 +947,9 @@ mod tests {
             retry_initial_ms: 500,
             retry_max_ms: 30_000,
             retry_timeout_secs: 300,
+            ws_ping_interval_secs: 30,
+            ws_pong_timeout_secs: 10,
+            dedup_cache_size: 10_000,
             log_level: String::new(),
             log_format: String::new(),
         }

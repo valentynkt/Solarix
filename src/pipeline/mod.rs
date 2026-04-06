@@ -142,7 +142,7 @@ impl BackfillProgress {
     fn log_progress(&mut self) {
         info!(
             current_slot = self.current_slot,
-            total_slots = self.end_slot - self.start_slot,
+            total_slots = self.end_slot.saturating_sub(self.start_slot),
             percent = format!("{:.1}%", self.percent_complete()),
             slots_per_sec = format!("{:.1}", self.slots_per_sec()),
             eta_secs = self.eta().as_secs(),
@@ -690,7 +690,17 @@ fn enrich_instruction(
     di.program_id = program_id.to_string();
     di.accounts = account_indices
         .iter()
-        .filter_map(|&idx| account_keys.get(idx as usize).cloned())
+        .filter_map(|&idx| {
+            let key = account_keys.get(idx as usize).cloned();
+            if key.is_none() {
+                warn!(
+                    idx,
+                    account_keys_len = account_keys.len(),
+                    "OOB account index in instruction"
+                );
+            }
+            key
+        })
         .collect();
 }
 

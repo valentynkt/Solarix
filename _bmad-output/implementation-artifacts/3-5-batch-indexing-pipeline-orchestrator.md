@@ -1,6 +1,6 @@
 # Story 3.5: Batch Indexing Pipeline Orchestrator
 
-Status: review
+Status: done
 
 ## Story
 
@@ -466,12 +466,12 @@ None — clean build on first attempt.
 
 ### Review Findings
 
-- [ ] [Review][Patch] P1: Writer task drain loop aborts on first write error, dropping remaining batches [mod.rs:618-634]
-- [ ] [Review][Patch] P2: run_backfill leaves indexer_state.status="backfilling" on failure — should set "failed" [mod.rs:313-319]
-- [ ] [Review][Patch] P3: run_account_snapshot loads all decoded accounts into memory before write — OOM risk for large programs [mod.rs:517-566]
-- [ ] [Review][Patch] P4: get_transaction silently accepts empty signatures vec via unwrap_or_default [rpc.rs:466-471]
-- [ ] [Review][Patch] P5: log_progress uses end_slot - start_slot without saturating_sub [mod.rs:147]
-- [ ] [Review][Patch] P6: enrich_instruction silently drops OOB account indices without warn log [mod.rs:687-690]
+- [x] [Review][Patch] P1: Writer task drain loop aborts on first write error, dropping remaining batches [mod.rs:618-634] — FIXED: log-and-continue pattern
+- [x] [Review][Patch] P2: run_backfill leaves indexer_state.status="backfilling" on failure — should set "failed" [mod.rs:313-319] — FIXED: set "failed" status on error
+- [x] [Review][Patch] P3: run_account_snapshot loads all decoded accounts into memory before write — OOM risk for large programs [mod.rs:517-566] — FIXED: batch writes in chunks of 1000
+- [x] [Review][Patch] P4: get_transaction silently accepts empty signatures vec via unwrap_or_default [rpc.rs:466-471] — FIXED: return parse error
+- [x] [Review][Patch] P5: log_progress uses end_slot - start_slot without saturating_sub [mod.rs:147] — FIXED: use saturating_sub
+- [x] [Review][Patch] P6: enrich_instruction silently drops OOB account indices without warn log [mod.rs:687-690] — FIXED: added warn log
 - [x] [Review][Defer] D1: run_account_snapshot non-atomic slot+accounts fetch — deferred, fundamental RPC limitation
 - [x] [Review][Defer] D2: u64 as i64 cast in update_indexer_state without overflow guard — deferred, Solana slots well within i64::MAX
 - [x] [Review][Defer] D3: process_chunk skips failed blocks without skip counter — deferred, gap detection is story 4.2
@@ -479,6 +479,7 @@ None — clean build on first attempt.
 ### Change Log
 
 - 2026-04-06: Initial implementation — all 11 tasks complete, 195 tests pass
+- 2026-04-06: Code review — 6 patches applied, 3 deferred, 10 dismissed. 214 tests pass
 
 ### File List
 

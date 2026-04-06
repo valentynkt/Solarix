@@ -463,12 +463,15 @@ impl RpcClient {
 
         let success = raw.meta.as_ref().map(|m| m.err.is_none()).unwrap_or(true);
 
-        let sig = raw
-            .transaction
-            .signatures
-            .first()
-            .cloned()
-            .unwrap_or_default();
+        let sig = match raw.transaction.signatures.first().cloned() {
+            Some(s) => s,
+            None => {
+                warn!("getTransaction returned tx with empty signatures array");
+                return Err(PipelineError::RpcFailed(
+                    "getTransaction: transaction has no signatures".into(),
+                ));
+            }
+        };
 
         let instructions = raw
             .transaction

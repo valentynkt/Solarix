@@ -81,6 +81,16 @@ pub struct Config {
     #[arg(long, env = "SOLARIX_RETRY_TIMEOUT_SECS", default_value_t = 300)]
     pub retry_timeout_secs: u64,
 
+    // === WebSocket ===
+    #[arg(long, env = "SOLARIX_WS_PING_INTERVAL_SECS", default_value_t = 30)]
+    pub ws_ping_interval_secs: u64,
+
+    #[arg(long, env = "SOLARIX_WS_PONG_TIMEOUT_SECS", default_value_t = 10)]
+    pub ws_pong_timeout_secs: u64,
+
+    #[arg(long, env = "SOLARIX_DEDUP_CACHE_SIZE", default_value_t = 10_000)]
+    pub dedup_cache_size: usize,
+
     // === Logging ===
     #[arg(long, env = "SOLARIX_LOG_LEVEL", default_value = "info")]
     pub log_level: String,

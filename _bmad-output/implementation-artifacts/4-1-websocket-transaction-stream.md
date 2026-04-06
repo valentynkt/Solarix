@@ -1,6 +1,6 @@
 # Story 4.1: WebSocket Transaction Stream
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -58,26 +58,26 @@ so that the index stays current with on-chain activity without manual re-trigger
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `tokio-tungstenite` + `futures-util` dependencies (AC: #2)
-  - [ ] Add `tokio-tungstenite = { version = "0.26", features = ["native-tls"] }` to `[dependencies]` in Cargo.toml
-  - [ ] Add `futures-util = "0.3"` to `[dependencies]` (for `StreamExt`/`SinkExt` on WS stream)
-  - [ ] Verify `cargo build` compiles with new deps
+- [x] Task 1: Add `tokio-tungstenite` + `futures-util` dependencies (AC: #2)
+  - [x] Add `tokio-tungstenite = { version = "0.26", features = ["native-tls"] }` to `[dependencies]` in Cargo.toml
+  - [x] Add `futures-util = "0.3"` to `[dependencies]` (for `StreamExt`/`SinkExt` on WS stream)
+  - [x] Verify `cargo build` compiles with new deps
 
-- [ ] Task 2: Add config fields (AC: #6)
-  - [ ] Add `ws_ping_interval_secs: u64` (env `SOLARIX_WS_PING_INTERVAL_SECS`, default 30) to Config
-  - [ ] Add `ws_pong_timeout_secs: u64` (env `SOLARIX_WS_PONG_TIMEOUT_SECS`, default 10) to Config
-  - [ ] Add `dedup_cache_size: usize` (env `SOLARIX_DEDUP_CACHE_SIZE`, default 10_000) to Config
+- [x] Task 2: Add config fields (AC: #6)
+  - [x] Add `ws_ping_interval_secs: u64` (env `SOLARIX_WS_PING_INTERVAL_SECS`, default 30) to Config
+  - [x] Add `ws_pong_timeout_secs: u64` (env `SOLARIX_WS_PONG_TIMEOUT_SECS`, default 10) to Config
+  - [x] Add `dedup_cache_size: usize` (env `SOLARIX_DEDUP_CACHE_SIZE`, default 10_000) to Config
 
-- [ ] Task 3: Implement `DeduplicationSet` (AC: #4)
-  - [ ] Add `pub struct DeduplicationSet` with fields: `seen: HashSet<String>`, `order: VecDeque<String>`, `max_size: usize`
-  - [ ] `pub fn new(max_size: usize) -> Self`
-  - [ ] `pub fn insert(&mut self, sig: String) -> bool` — returns `true` if new, `false` if duplicate. Evicts oldest if full.
-  - [ ] `pub fn contains(&self, sig: &str) -> bool`
-  - [ ] `pub fn len(&self) -> usize`
+- [x] Task 3: Implement `DeduplicationSet` (AC: #4)
+  - [x] Add `pub struct DeduplicationSet` with fields: `seen: HashSet<String>`, `order: VecDeque<String>`, `max_size: usize`
+  - [x] `pub fn new(max_size: usize) -> Self`
+  - [x] `pub fn insert(&mut self, sig: String) -> bool` — returns `true` if new, `false` if duplicate. Evicts oldest if full.
+  - [x] `pub fn contains(&self, sig: &str) -> bool`
+  - [x] `pub fn len(&self) -> usize`
 
-- [ ] Task 4: Define `StreamEvent` and redesign `TransactionStream` trait (AC: #1)
-  - [ ] Add `StreamEvent` struct: `signature: String`, `slot: u64`, `error: Option<serde_json::Value>`
-  - [ ] Rewrite `TransactionStream` trait using `#[async_trait]`:
+- [x] Task 4: Define `StreamEvent` and redesign `TransactionStream` trait (AC: #1)
+  - [x] Add `StreamEvent` struct: `signature: String`, `slot: u64`, `error: Option<serde_json::Value>`
+  - [x] Rewrite `TransactionStream` trait using `#[async_trait]`:
     ```rust
     #[async_trait]
     pub trait TransactionStream: Send + Sync {
@@ -88,8 +88,8 @@ so that the index stays current with on-chain activity without manual re-trigger
     }
     ```
 
-- [ ] Task 5: Implement `WsTransactionStream` core (AC: #2, #5)
-  - [ ] Add `pub struct WsTransactionStream` with fields:
+- [x] Task 5: Implement `WsTransactionStream` core (AC: #2, #5)
+  - [x] Add `pub struct WsTransactionStream` with fields:
     - `ws_url: String` (resolved from config)
     - `ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>` — active connection (types from `tokio_tungstenite`)
     - `subscription_id: Option<u64>` — from logsSubscribe response
@@ -98,47 +98,47 @@ so that the index stays current with on-chain activity without manual re-trigger
     - `ping_interval: Duration`
     - `pong_timeout: Duration`
     - `last_message_time: Instant`
-  - [ ] `pub fn new(config: &Config) -> Self` — resolve ws_url, init dedup set
-  - [ ] Implement `fn derive_ws_url(rpc_url: &str) -> String`
+  - [x] `pub fn new(config: &Config) -> Self` — resolve ws_url, init dedup set
+  - [x] Implement `fn derive_ws_url(rpc_url: &str) -> String`
 
-- [ ] Task 6: Implement `subscribe()` (AC: #2)
-  - [ ] Connect to `ws_url` via `tokio_tungstenite::connect_async()`
-  - [ ] Send JSON-RPC 2.0 request: `logsSubscribe([{"mentions": [program_id]}, {"commitment": "confirmed"}])`
-  - [ ] Parse response to extract `subscription_id`
-  - [ ] Store connection and subscription_id
+- [x] Task 6: Implement `subscribe()` (AC: #2)
+  - [x] Connect to `ws_url` via `tokio_tungstenite::connect_async()`
+  - [x] Send JSON-RPC 2.0 request: `logsSubscribe([{"mentions": [program_id]}, {"commitment": "confirmed"}])`
+  - [x] Parse response to extract `subscription_id`
+  - [x] Store connection and subscription_id
 
-- [ ] Task 7: Implement `next()` with heartbeat (AC: #2, #3, #4)
-  - [ ] Use `tokio::select!` to race:
+- [x] Task 7: Implement `next()` with heartbeat (AC: #2, #3, #4)
+  - [x] Use `tokio::select!` to race:
     - WS message arrival
     - Ping timeout (time since last message > `ping_interval`)
-  - [ ] On message: parse `logsNotification`, extract `signature`, `slot`, `err` from JSON
-  - [ ] Check dedup set — skip if duplicate
-  - [ ] Update `last_seen_slot` if new slot > current
-  - [ ] Reset `last_message_time` on any received message
-  - [ ] On ping timeout: send WebSocket Ping frame
-  - [ ] If no Pong received within `pong_timeout`: return `Err(PipelineError::WebSocketDisconnect(...))`
-  - [ ] Handle WS close/error frames: return `Err(PipelineError::WebSocketDisconnect(...))`
+  - [x] On message: parse `logsNotification`, extract `signature`, `slot`, `err` from JSON
+  - [x] Check dedup set — skip if duplicate
+  - [x] Update `last_seen_slot` if new slot > current
+  - [x] Reset `last_message_time` on any received message
+  - [x] On ping timeout: send WebSocket Ping frame
+  - [x] If no Pong received within `pong_timeout`: return `Err(PipelineError::WebSocketDisconnect(...))`
+  - [x] Handle WS close/error frames: return `Err(PipelineError::WebSocketDisconnect(...))`
 
-- [ ] Task 8: Implement `unsubscribe()` (AC: #2)
-  - [ ] Send `logsUnsubscribe([subscription_id])` if subscription is active
-  - [ ] Close WebSocket connection cleanly
-  - [ ] Clear subscription_id
+- [x] Task 8: Implement `unsubscribe()` (AC: #2)
+  - [x] Send `logsUnsubscribe([subscription_id])` if subscription is active
+  - [x] Close WebSocket connection cleanly
+  - [x] Clear subscription_id
 
-- [ ] Task 9: Unit tests (AC: #7)
-  - [ ] `test_dedup_set_insert_and_contains` — insert returns true on first, false on duplicate
-  - [ ] `test_dedup_set_eviction` — set at capacity evicts oldest entry when new one is inserted
-  - [ ] `test_dedup_set_maintains_bounded_size` — insert 2x max_size entries, verify len == max_size
-  - [ ] `test_derive_ws_url_https` — `https://api.mainnet-beta.solana.com` -> `wss://api.mainnet-beta.solana.com`
-  - [ ] `test_derive_ws_url_http` — `http://localhost:8899` -> `ws://localhost:8899`
-  - [ ] `test_derive_ws_url_already_wss` — `wss://already.good` -> `wss://already.good`
-  - [ ] `test_stream_event_creation` — verify struct construction
-  - [ ] `test_ws_transaction_stream_is_send` — compile-time check that `WsTransactionStream: Send`
+- [x] Task 9: Unit tests (AC: #7)
+  - [x] `test_dedup_set_insert_and_contains` — insert returns true on first, false on duplicate
+  - [x] `test_dedup_set_eviction` — set at capacity evicts oldest entry when new one is inserted
+  - [x] `test_dedup_set_maintains_bounded_size` — insert 2x max_size entries, verify len == max_size
+  - [x] `test_derive_ws_url_https` — `https://api.mainnet-beta.solana.com` -> `wss://api.mainnet-beta.solana.com`
+  - [x] `test_derive_ws_url_http` — `http://localhost:8899` -> `ws://localhost:8899`
+  - [x] `test_derive_ws_url_already_wss` — `wss://already.good` -> `wss://already.good`
+  - [x] `test_stream_event_creation` — verify struct construction
+  - [x] `test_ws_transaction_stream_is_send` — compile-time check that `WsTransactionStream: Send`
 
-- [ ] Task 10: Verify (AC: all)
-  - [ ] `cargo build` compiles
-  - [ ] `cargo clippy` passes
-  - [ ] `cargo fmt -- --check` passes
-  - [ ] `cargo test` — all tests pass (existing + new)
+- [x] Task 10: Verify (AC: all)
+  - [x] `cargo build` compiles
+  - [x] `cargo clippy` passes
+  - [x] `cargo fmt -- --check` passes
+  - [x] `cargo test` — all tests pass (existing + new, 222 total)
 
 ## Dev Notes
 
@@ -481,10 +481,33 @@ Or simpler: use `id: 1` for subscribe and `id: 2` for unsubscribe since only one
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+None — clean implementation with no blockers.
+
 ### Completion Notes List
 
+- Replaced 8-line RPITIT stub with full WebSocket transport layer (~400 LOC)
+- `DeduplicationSet`: bounded HashSet+VecDeque with FIFO eviction, O(1) insert/contains
+- `TransactionStream` trait: `#[async_trait]` for object safety (enables `Box<dyn TransactionStream>`)
+- `WsTransactionStream`: complete `logsSubscribe` lifecycle with heartbeat monitoring
+- `next()` uses scoped borrow pattern: `tokio::select!` inside a block returns `Received` enum, processing happens after ws borrow is released — avoids `!Send` and borrow-checker issues
+- Heartbeat: configurable ping interval (default 30s) + pong timeout (default 10s), two-phase detection with `pending_ping` flag
+- All Message variants handled: Text (notifications), Ping (auto-pong), Pong (clears pending), Close (disconnect error), Binary/Frame (ignored)
+- No reconnection logic — returns `Err(WebSocketDisconnect)` for caller to handle (story 4.2 responsibility)
+- Added 3 config fields with env var support to existing Config struct
+- Fixed existing `make_config()` test helper in `api/handlers.rs` to include new fields
+- 8 new unit tests, all 222 tests pass
+
 ### File List
+
+- `Cargo.toml` — added `tokio-tungstenite` 0.26 (native-tls) + `futures-util` 0.3
+- `src/config.rs` — added `ws_ping_interval_secs`, `ws_pong_timeout_secs`, `dedup_cache_size`
+- `src/pipeline/ws.rs` — complete rewrite: StreamEvent, DeduplicationSet, TransactionStream trait, WsTransactionStream impl, 8 unit tests
+- `src/api/handlers.rs` — added new config fields to `make_config()` test helper
+
+### Change Log
+
+- 2026-04-06: Implemented WebSocket transaction stream transport layer (story 4.1)
