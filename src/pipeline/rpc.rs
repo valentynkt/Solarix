@@ -162,6 +162,20 @@ struct RawInnerInstructionGroup {
 }
 
 // ---------------------------------------------------------------------------
+// Raw deserialization types for getTransaction
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[allow(dead_code)] // block_time deserialized but not read (available for future use)
+struct RawGetTransactionResult {
+    slot: u64,
+    transaction: RawTransactionPayload,
+    meta: Option<RawTransactionMeta>,
+    #[serde(rename = "blockTime")]
+    block_time: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
 // Raw deserialization types for getProgramAccounts
 // ---------------------------------------------------------------------------
 
@@ -309,6 +323,89 @@ impl RpcClient {
             .ok_or_else(|| PipelineError::RpcFailed("null result without error".into()))
     }
 
+    /// Send a JSON-RPC 2.0 request (single attempt, no retry). Returns `None` for null result.
+    async fn send_rpc_request_optional(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, PipelineError> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+
+        let resp = self
+            .http
+            .post(&self.rpc_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    PipelineError::RpcFailed(format!("timeout: {e}"))
+                } else if e.is_connect() {
+                    PipelineError::RpcFailed(format!("connection failed: {e}"))
+                } else {
+                    PipelineError::RpcFailed(format!("request failed: {e}"))
+                }
+            })?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(PipelineError::RateLimited);
+        }
+        if !status.is_success() {
+            if status.is_client_error() {
+                return Err(PipelineError::Fatal(format!("HTTP {status}")));
+            }
+            return Err(PipelineError::RpcFailed(format!("HTTP {status}")));
+        }
+
+        let rpc_resp: JsonRpcResponse<serde_json::Value> = resp
+            .json()
+            .await
+            .map_err(|e| PipelineError::RpcFailed(format!("response parse failed: {e}")))?;
+
+        if let Some(err) = rpc_resp.error {
+            return Err(classify_rpc_error(err));
+        }
+
+        Ok(rpc_resp.result)
+    }
+
+    /// Send a JSON-RPC request with rate limiting and retry. Returns `None` for null result.
+    async fn rpc_request_optional(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, PipelineError> {
+        let method_owned = method.to_string();
+        let method_for_log = method_owned.clone();
+        let params_clone = params.clone();
+
+        (|| async {
+            self.rate_limiter.until_ready().await;
+            self.send_rpc_request_optional(&method_owned, params_clone.clone())
+                .await
+        })
+        .retry(
+            ExponentialBuilder::default()
+                .with_min_delay(self.retry_min_delay)
+                .with_max_delay(self.retry_max_delay)
+                .with_total_delay(Some(self.retry_timeout))
+                .with_factor(2.0)
+                .with_jitter()
+                .without_max_times(),
+        )
+        .when(|e: &PipelineError| e.is_retryable())
+        .notify(|err: &PipelineError, dur: Duration| {
+            warn!(error = %err, delay = ?dur, method = %method_for_log, "retrying RPC call");
+        })
+        .await
+    }
+
     /// Send a JSON-RPC request with rate limiting and retry.
     async fn rpc_request(
         &self,
@@ -338,6 +435,78 @@ impl RpcClient {
             warn!(error = %err, delay = ?dur, method = %method_for_log, "retrying RPC call");
         })
         .await
+    }
+    /// Fetch a single transaction by signature.
+    /// Returns `None` if the transaction is not found or not yet confirmed.
+    pub async fn get_transaction(
+        &self,
+        signature: &str,
+    ) -> Result<Option<RpcTransaction>, PipelineError> {
+        let params = serde_json::json!([
+            signature,
+            {
+                "encoding": "json",
+                "maxSupportedTransactionVersion": 0,
+                "commitment": "finalized"
+            }
+        ]);
+
+        let maybe_value = self.rpc_request_optional("getTransaction", params).await?;
+
+        let value = match maybe_value {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let raw: RawGetTransactionResult = serde_json::from_value(value)
+            .map_err(|e| PipelineError::RpcFailed(format!("getTransaction parse failed: {e}")))?;
+
+        let success = raw.meta.as_ref().map(|m| m.err.is_none()).unwrap_or(true);
+
+        let sig = raw
+            .transaction
+            .signatures
+            .first()
+            .cloned()
+            .unwrap_or_default();
+
+        let instructions = raw
+            .transaction
+            .message
+            .instructions
+            .iter()
+            .map(parse_raw_instruction)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let inner_instructions = raw
+            .meta
+            .as_ref()
+            .and_then(|m| m.inner_instructions.as_ref())
+            .map(|groups| {
+                groups
+                    .iter()
+                    .map(parse_raw_inner_instruction_group)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let mut account_keys = raw.transaction.message.account_keys;
+        if let Some(meta) = &raw.meta {
+            if let Some(loaded) = &meta.loaded_addresses {
+                account_keys.extend(loaded.writable.iter().cloned());
+                account_keys.extend(loaded.readonly.iter().cloned());
+            }
+        }
+
+        Ok(Some(RpcTransaction {
+            signature: sig,
+            slot: raw.slot,
+            success,
+            account_keys,
+            instructions,
+            inner_instructions,
+        }))
     }
 }
 

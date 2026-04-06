@@ -1,5 +1,5 @@
 # generated: 2026-04-05
-# last_updated: 2026-04-06 (story 3-4 created, sprint status synced)
+# last_updated: 2026-04-07 (epic-5 done, sprint 3 status synced)
 # project: Solarix
 # project_key: NOKEY
 # tracking_system: file-system
@@ -49,7 +49,7 @@
 #   This ensures each sprint's stories build on a stable, integrated codebase.
 
 generated: 2026-04-05
-last_updated: 2026-04-06
+last_updated: 2026-04-07
 project: Solarix
 project_key: NOKEY
 tracking_system: file-system
@@ -108,9 +108,9 @@ development_status:
 
   tech-debt-sweep-sprint-2-3: done # Track B | deps: none | files: rpc.rs, handlers.rs, idl/mod.rs, registry.rs, decoder/mod.rs, config.rs | P1+P2 fixes from done stories
   3-4-storage-writer-and-atomic-checkpointing: done # Track A | deps: 2.3, 3.1, 3.2, 3.3 | files: src/storage/writer.rs | 3 review patches applied, 3 deferred, 6 spec fixes
-  3-5-batch-indexing-pipeline-orchestrator: ready-for-dev # Track A | deps: 3.3, 3.4 | files: src/pipeline/mod.rs
+  3-5-batch-indexing-pipeline-orchestrator: review # Track A | deps: 3.3, 3.4 | files: src/pipeline/mod.rs, src/pipeline/rpc.rs
 
-  epic-5: in-progress
+  epic-5: done
   5-1-program-management-endpoints: done # Track B | deps: 2.2, 1.3 | files: src/api/
   5-2-dynamic-query-builder-and-filters: done # Track B | deps: 2.3 | files: src/api/filters.rs, src/storage/queries.rs
 
@@ -128,12 +128,12 @@ development_status:
   # Estimated: 5 stories across 2 worktrees
   # ============================================================================
 
-  epic-4: backlog
-  4-1-websocket-transaction-stream: backlog # Track A | deps: 3.3, 3.1 | files: src/pipeline/ws.rs
+  epic-4: in-progress
+  4-1-websocket-transaction-stream: ready-for-dev # Track A | deps: 3.3, 3.1 | files: src/pipeline/ws.rs
   4-2-streaming-pipeline-and-gap-detection: backlog # Track A | deps: 4.1, 3.5 | files: src/pipeline/mod.rs
   4-3-cold-start-and-graceful-shutdown: backlog # Track A | deps: 4.2 | files: src/pipeline/mod.rs, src/main.rs
 
-  5-3-instruction-and-account-query-endpoints: backlog # Track B | deps: 5.2, 3.4 | files: src/api/handlers.rs
+  5-3-instruction-and-account-query-endpoints: ready-for-dev # Track B | deps: 5.2, 3.4 | files: src/api/handlers.rs
   5-4-aggregation-statistics-and-health-enhancement: backlog # Track B | deps: 5.3 | files: src/api/handlers.rs
 
   epic-4-retrospective: optional

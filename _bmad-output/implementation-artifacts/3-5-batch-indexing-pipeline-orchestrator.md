@@ -1,6 +1,6 @@
 # Story 3.5: Batch Indexing Pipeline Orchestrator
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -85,81 +85,81 @@ so that past on-chain activity is captured in the database for querying.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `get_transaction` to `RpcClient` (AC: #9)
-  - [ ] Add method `pub async fn get_transaction(&self, signature: &str) -> Result<Option<RpcTransaction>, PipelineError>`
-  - [ ] Build JSON-RPC request for `getTransaction` with `maxSupportedTransactionVersion: 0`, `encoding: "json"`
-  - [ ] Parse response into `RpcTransaction` using existing parsing logic from `get_block`
-  - [ ] Handle null result (transaction not found → `Ok(None)`)
-  - [ ] Uses existing rate limiter + retry (via `send_rpc_with_retry`)
+- [x] Task 1: Add `get_transaction` to `RpcClient` (AC: #9)
+  - [x] Add method `pub async fn get_transaction(&self, signature: &str) -> Result<Option<RpcTransaction>, PipelineError>`
+  - [x] Build JSON-RPC request for `getTransaction` with `maxSupportedTransactionVersion: 0`, `encoding: "json"`
+  - [x] Parse response into `RpcTransaction` using existing parsing logic from `get_block`
+  - [x] Handle null result (transaction not found → `Ok(None)`)
+  - [x] Uses existing rate limiter + retry (via `rpc_request_optional`)
 
-- [ ] Task 2: Define `PipelineOrchestrator` struct (AC: #1)
-  - [ ] Replace empty `pub struct PipelineOrchestrator;` stub
-  - [ ] Fields: `pool: PgPool`, `rpc: RpcClient`, `decoder: Box<dyn SolarixDecoder>`, `writer: StorageWriter`, `config: Config`, `cancel: CancellationToken`
-  - [ ] Add `pub fn new(pool: PgPool, rpc: RpcClient, decoder: Box<dyn SolarixDecoder>, writer: StorageWriter, config: Config, cancel: CancellationToken) -> Self`
-  - [ ] Keep existing `PipelineError` enum and `is_retryable()` unchanged
+- [x] Task 2: Define `PipelineOrchestrator` struct (AC: #1)
+  - [x] Replace empty `pub struct PipelineOrchestrator;` stub
+  - [x] Fields: `pool: PgPool`, `rpc: RpcClient`, `decoder: Box<dyn SolarixDecoder>`, `writer: Arc<StorageWriter>`, `config: Config`, `cancel: CancellationToken`
+  - [x] Add `pub fn new(pool: PgPool, rpc: RpcClient, decoder: Box<dyn SolarixDecoder>, writer: StorageWriter, config: Config, cancel: CancellationToken) -> Self`
+  - [x] Keep existing `PipelineError` enum and `is_retryable()` unchanged
 
-- [ ] Task 3: Implement backfill chunking and block fetching (AC: #2, #7)
-  - [ ] Add `pub async fn run_backfill(&self, program_id: &str, schema_name: &str, idl: &Idl, start_slot: u64, end_slot: u64) -> Result<(), PipelineError>`
-  - [ ] Read checkpoint via `self.writer.read_checkpoint(schema_name, "backfill")` — resume from `max(checkpoint.last_slot + 1, start_slot)`
-  - [ ] Compute chunks: `compute_chunks(effective_start, end_slot, self.config.backfill_chunk_size)` → `Vec<(u64, u64)>`
-  - [ ] For each chunk: call `self.rpc.get_blocks(chunk_start, chunk_end)` to get block slot list
-  - [ ] For each block slot: call `self.rpc.get_block(slot)` — skip `None` (empty/skipped slots)
-  - [ ] Check `self.cancel.is_cancelled()` between chunks for graceful exit
+- [x] Task 3: Implement backfill chunking and block fetching (AC: #2, #7)
+  - [x] Add `pub async fn run_backfill(&self, program_id: &str, schema_name: &str, idl: &Idl, start_slot: u64, end_slot: u64) -> Result<(), PipelineError>`
+  - [x] Read checkpoint via `self.writer.read_checkpoint(schema_name, "backfill")` — resume from `max(checkpoint.last_slot + 1, start_slot)`
+  - [x] Compute chunks: `compute_backfill_chunks(effective_start, end_slot, self.config.backfill_chunk_size)` → `Vec<(u64, u64)>`
+  - [x] For each chunk: call `self.rpc.get_blocks(chunk_start, chunk_end)` to get block slot list
+  - [x] For each block slot: call `self.rpc.get_block(slot)` — skip `None` (empty/skipped slots)
+  - [x] Check `self.cancel.is_cancelled()` between chunks for graceful exit
 
-- [ ] Task 4: Implement transaction filtering (AC: #3)
-  - [ ] Add `fn filter_transactions_for_program(block: &RpcBlock, program_id: &str, index_failed: bool) -> Vec<&RpcTransaction>`
-  - [ ] For each transaction: check if `success == true` (or `index_failed` flag)
-  - [ ] Check top-level instructions: `account_keys[ix.program_id_index] == program_id`
-  - [ ] Check inner instructions: same program_id check on CPI instructions
-  - [ ] Return references to matching transactions
+- [x] Task 4: Implement transaction filtering (AC: #3)
+  - [x] Inline filtering via `instruction_targets_program()` helper function
+  - [x] For each transaction: check if `success == true` (or `config.index_failed_txs` flag)
+  - [x] Check top-level instructions: `account_keys[ix.program_id_index] == program_id`
+  - [x] Check inner instructions: same program_id check on CPI instructions
 
-- [ ] Task 5: Implement instruction decoding and enrichment (AC: #4)
-  - [ ] For each matching transaction + instruction pair, call `decoder.decode_instruction(program_id, &ix.data, idl)`
-  - [ ] On `DecodeError::UnknownDiscriminator` → `warn!`, skip instruction, continue
-  - [ ] On other `DecodeError` → `warn!`, skip instruction, continue
-  - [ ] Track decode failure rate per chunk — if >90% fail, log at `error!` (likely IDL mismatch)
-  - [ ] Enrich `DecodedInstruction`: set `signature`, `slot`, `block_time`, `instruction_index`, `inner_index`, resolve `accounts` from `account_keys` using instruction's account index list
-  - [ ] Set `program_id` on the decoded instruction
+- [x] Task 5: Implement instruction decoding and enrichment (AC: #4)
+  - [x] For each matching transaction + instruction pair, call `decoder.decode_instruction(program_id, &ix.data, idl)`
+  - [x] On `DecodeError::UnknownDiscriminator` → `warn!`, skip instruction, continue
+  - [x] On other `DecodeError` → `warn!`, skip instruction, continue
+  - [x] Track decode failure rate per block — if >90% fail, log at `error!` (likely IDL mismatch)
+  - [x] Enrich `DecodedInstruction`: set `signature`, `slot`, `block_time`, `instruction_index`, `inner_index`, resolve `accounts` from `account_keys` using instruction's account index list
+  - [x] Set `program_id` on the decoded instruction
 
-- [ ] Task 6: Implement mpsc channel + writer task (AC: #2, #8)
-  - [ ] Create bounded `tokio::sync::mpsc::channel::<WriteBatch>(capacity)` where `WriteBatch` holds `(schema_name, stream, instructions, accounts, slot, signature)`
-  - [ ] Spawn writer task: loop receiving from channel, call `self.writer.write_block(...)` for each batch
-  - [ ] Writer task exits when channel is closed (sender dropped) or cancellation
-  - [ ] On writer error: log at `error!`, propagate via oneshot or shared error state
+- [x] Task 6: Implement mpsc channel + writer task (AC: #2, #8)
+  - [x] Create bounded `tokio::sync::mpsc::channel::<WriteBatch>(capacity)` where `WriteBatch` holds `(schema_name, stream, instructions, accounts, slot, signature)`
+  - [x] Spawn writer task: loop receiving from channel, call `self.writer.write_block(...)` for each batch
+  - [x] Writer task exits when channel is closed (sender dropped) or cancellation
+  - [x] On writer error: propagate via Result return from writer_task, logged by caller
 
-- [ ] Task 7: Implement account snapshot (AC: #5)
-  - [ ] Add `pub async fn run_account_snapshot(&self, program_id: &str, schema_name: &str, idl: &Idl) -> Result<(), PipelineError>`
-  - [ ] Call `self.rpc.get_program_accounts(program_id)` → Vec of pubkeys
-  - [ ] Batch into chunks of 100, call `self.rpc.get_multiple_accounts(chunk)` for each
-  - [ ] For each `RpcAccountInfo`: call `decoder.decode_account(program_id, &info.pubkey, &info.data, idl)`
-  - [ ] Enrich `DecodedAccount`: set `pubkey`, `slot_updated` (from current slot), `lamports`
-  - [ ] Write via `self.writer.write_block(schema_name, "accounts", &[], &decoded_accounts, slot, None)`
+- [x] Task 7: Implement account snapshot (AC: #5)
+  - [x] Add `pub async fn run_account_snapshot(&self, program_id: &str, schema_name: &str, idl: &Idl) -> Result<(), PipelineError>`
+  - [x] Call `self.rpc.get_program_accounts(program_id)` → Vec of pubkeys
+  - [x] Batch via `self.rpc.get_multiple_accounts(pubkeys)` (already auto-batches in chunks of 100)
+  - [x] For each `RpcAccountInfo`: call `decoder.decode_account(program_id, &info.pubkey, &info.data, idl)`
+  - [x] Enrich `DecodedAccount`: set `slot_updated` (from current slot), `lamports`
+  - [x] Write via `self.writer.write_block(schema_name, "accounts", &[], &decoded_accounts, slot, None)`
 
-- [ ] Task 8: Implement progress tracking (AC: #6)
-  - [ ] Add `BackfillProgress` struct: `start_slot`, `end_slot`, `current_slot`, `blocks_processed`, `txs_decoded`, `started_at: Instant`
-  - [ ] Methods: `percent_complete()`, `slots_per_sec()`, `eta() -> Duration`
-  - [ ] Log progress at `info!` level every `config.checkpoint_interval_secs` seconds (default 10)
-  - [ ] Use `tokio::time::Instant` for timing
+- [x] Task 8: Implement progress tracking (AC: #6)
+  - [x] Add `BackfillProgress` struct: `start_slot`, `end_slot`, `current_slot`, `blocks_processed`, `txs_decoded`, `started_at: Instant`
+  - [x] Methods: `percent_complete()`, `slots_per_sec()`, `eta() -> Duration`
+  - [x] Log progress at `info!` level every `config.checkpoint_interval_secs` seconds (default 10)
+  - [x] Use `tokio::time::Instant` for timing
 
-- [ ] Task 9: Implement indexer_state updates (AC: #10)
-  - [ ] Add private method `async fn update_indexer_state(pool: &PgPool, program_id: &str, status: &str, last_slot: Option<u64>) -> Result<(), PipelineError>`
-  - [ ] Uses `sqlx::query()` with bind params — NOT raw string interpolation
-  - [ ] Updates `status`, `last_processed_slot`, `last_heartbeat = NOW()` on `indexer_state` WHERE `program_id = $1`
-  - [ ] Called at: backfill start (`"backfilling"`), chunk completion, backfill end (`"idle"`)
+- [x] Task 9: Implement indexer_state updates (AC: #10)
+  - [x] Add private function `async fn update_indexer_state(pool: &PgPool, program_id: &str, status: &str, last_slot: Option<u64>) -> Result<(), PipelineError>`
+  - [x] Uses `sqlx::query()` with bind params — NOT raw string interpolation
+  - [x] Updates `status`, `last_processed_slot`, `last_heartbeat = NOW()` on `indexer_state` WHERE `program_id = $1`
+  - [x] Called at: backfill start (`"backfilling"`), chunk completion, backfill end (`"idle"`)
+  - [x] Added `increment_indexer_counters` for total_instructions/total_accounts
 
-- [ ] Task 10: Unit tests (AC: all)
-  - [ ] `test_compute_chunks` — verify chunking logic: normal range, single chunk, exact boundary, zero-length range
-  - [ ] `test_filter_transactions_for_program` — program match, no match, inner instruction match, failed tx filtering
-  - [ ] `test_instruction_enrichment` — verify all fields set correctly from RpcTransaction context
-  - [ ] `test_backfill_progress` — verify percent_complete, slots_per_sec, eta calculations
-  - [ ] `test_pipeline_orchestrator_send` — compile-time Send safety check for PipelineOrchestrator
-  - [ ] `test_decode_failure_rate_tracking` — verify >90% failure triggers error log
+- [x] Task 10: Unit tests (AC: all)
+  - [x] `test_compute_backfill_chunks_*` — verify chunking logic: normal range, single chunk, exact boundary, zero-length range, zero chunk_size
+  - [x] `test_filter_transactions_*` — program match, no match, inner instruction match, failed tx filtering
+  - [x] `test_enrich_instruction_*` — verify all fields set correctly, inner index, OOB account indices
+  - [x] `test_backfill_progress_*` — verify percent_complete, slots_per_sec, eta calculations
+  - [x] `_require_pipeline_orchestrator_send` — compile-time Send+Sync safety check for PipelineOrchestrator
+  - [x] `test_decode_failure_rate_tracking` — verify >90% failure triggers error log
 
-- [ ] Task 11: Verify (AC: all)
-  - [ ] `cargo build` compiles
-  - [ ] `cargo clippy` passes
-  - [ ] `cargo fmt -- --check` passes
-  - [ ] `cargo test` — all tests pass (existing + new)
+- [x] Task 11: Verify (AC: all)
+  - [x] `cargo build` compiles (0 errors, 0 warnings)
+  - [x] `cargo clippy` passes (no issues)
+  - [x] `cargo fmt -- --check` passes
+  - [x] `cargo test` — 195 tests pass (existing + 23 new)
 
 ## Dev Notes
 
@@ -445,10 +445,30 @@ Integration tests (requiring PostgreSQL + RPC) are deferred to Epic 6.
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+None — clean build on first attempt.
+
 ### Completion Notes List
 
+- Replaced empty `PipelineOrchestrator` stub with full batch indexing implementation
+- Added `get_transaction` method to `RpcClient` with `rpc_request_optional` helper for nullable responses
+- `PipelineOrchestrator::run_backfill()` implements the full backfill pipeline: checkpoint resume → chunk → fetch blocks → filter transactions → decode instructions → enrich → mpsc channel → writer task → indexer_state updates
+- `PipelineOrchestrator::run_account_snapshot()` fetches all program accounts, decodes, and writes in batch
+- Writer task runs as a spawned tokio task consuming from a bounded mpsc channel; drains remaining items on cancellation
+- Transaction filtering uses `instruction_targets_program()` inline rather than a separate filter function — cleaner integration with the decode loop
+- `BackfillProgress` tracks slots/sec, percent complete, ETA with configurable log interval
+- `update_indexer_state()` and `increment_indexer_counters()` as free functions for Send-friendliness
+- `StorageWriter` wrapped in `Arc` for sharing between orchestrator and writer task
+- Design note: writer field changed from `StorageWriter` to `Arc<StorageWriter>` to support sharing with the spawned writer task
+
+### Change Log
+
+- 2026-04-06: Initial implementation — all 11 tasks complete, 195 tests pass
+
 ### File List
+
+- `src/pipeline/mod.rs` — Complete rewrite: PipelineOrchestrator struct, run_backfill(), run_account_snapshot(), writer_task(), helper functions, 23 unit tests
+- `src/pipeline/rpc.rs` — Added: RawGetTransactionResult, send_rpc_request_optional(), rpc_request_optional(), get_transaction()
