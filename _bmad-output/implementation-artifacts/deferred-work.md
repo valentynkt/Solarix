@@ -130,3 +130,10 @@ these as known technical debt; stories still in-progress have blocking items not
 
 - **No `from <= to` validation in `instruction_count`** — `src/api/handlers.rs`. When `from > to`, the query silently returns empty results rather than a 400 error. Not a crash; usability improvement. Defer to post-MVP.
 - **Health `programs` field is `null` instead of `[]` when DB is down** — `src/api/handlers.rs:109-112`. Spec says "array of per-program status" but the field is `null` (not `[]`) when the DB query fails or DB is unreachable. Cosmetic inconsistency; clients should handle both.
+
+## Deferred from: code review of 4-2-streaming-pipeline-and-gap-detection (2026-04-07)
+
+- **`ix_index as u8` truncation for >255 instructions** — `src/pipeline/mod.rs:430`. Pre-existing pattern from original `decode_block`. Solana tx size limit makes >255 instructions practically unreachable, but the cast is technically lossy.
+- **`mini_backfill` doesn't update `indexer_state` on success completion** — `src/pipeline/mod.rs:909`. State remains `catching_up` until the next loop iteration sets `streaming`. Story 4.3 (cold start) should handle recovery from stale `catching_up` state.
+- **`_checkpoints 'realtime'` not advanced for no-op tx writes** — `src/pipeline/mod.rs:787`. When streaming events produce zero decoded instructions, `write_block` is skipped, so the checkpoint doesn't advance. `stream.last_seen_slot()` is the primary slot tracker; checkpoint is the secondary fallback.
+- **No behavioral state transition tests** — Integration test scope. Tests for Streaming → CatchingUp → Streaming and fatal → error state transitions require mocking full WS + RPC + DB stack. Defer to story 6-3.

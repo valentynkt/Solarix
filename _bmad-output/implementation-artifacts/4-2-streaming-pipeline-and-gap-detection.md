@@ -511,3 +511,16 @@ Claude Opus 4.6 (1M context)
 - `src/config.rs` — Added `max_consecutive_fetch_failures` field
 - `src/pipeline/mod.rs` — Added StreamInterrupt enum, decode_transaction(), run_streaming(), stream_events(), mini_backfill(), refactored decode_block, added 9 unit tests
 - `src/api/handlers.rs` — Updated make_config() test helper with new field
+
+### Review Findings
+
+- [ ] [Review][Patch] Reconnected WsTransactionStream is discarded; loop creates redundant second connection — `Ok(_new_stream)` drops the reconnected stream, then the outer loop creates a brand new one. Wastes the backon retry effort and opens a gap window for lost events. [pipeline/mod.rs:681]
+- [ ] [Review][Patch] `disconnect_slot = 0` fallback triggers full-chain backfill from genesis — if WS disconnects before any tx is seen and no checkpoint exists, mini_backfill attempts to backfill from slot 1 to chain tip (~320M slots). [pipeline/mod.rs:725]
+- [ ] [Review][Patch] `mini_backfill` writes stream `"backfill"` instead of spec-required `"catchup"` — `process_chunk` hardcodes `stream: "backfill".to_string()` with no parameter to override. Violates AC3. [pipeline/mod.rs:377]
+- [ ] [Review][Patch] `indexer_state.status` not set to `"error"` when consecutive failure threshold exceeded — AC5 violation. The `StreamInterrupt::Fatal` path at line 644 exits without updating indexer_state, unlike the reconnection failure path. [pipeline/mod.rs:644]
+- [ ] [Review][Patch] `max_consecutive_fetch_failures` missing `value_parser = parse_nonzero_u64` — setting env to 0 makes pipeline fatal on first RPC error. [config.rs:93]
+- [ ] [Review][Patch] `test_stream_interrupt_variants` uses bare `matches!()` — return value discarded, test asserts nothing. Wrap in `assert!()`. [pipeline/mod.rs:1826-1829]
+- [x] [Review][Defer] `ix_index as u8` truncation for >255 instructions [pipeline/mod.rs:430] — deferred, pre-existing pattern from original decode_block; practically unreachable (Solana tx size limit)
+- [x] [Review][Defer] `mini_backfill` doesn't update `indexer_state` on success completion [pipeline/mod.rs:909] — deferred, story 4.3 (cold start) handles recovery from stale catching_up state
+- [x] [Review][Defer] `_checkpoints 'realtime'` not advanced for no-op tx writes [pipeline/mod.rs:787] — deferred, stream.last_seen_slot() is primary slot tracker; checkpoint is fallback only
+- [x] [Review][Defer] No behavioral state transition tests — deferred, integration test scope (story 6-3)

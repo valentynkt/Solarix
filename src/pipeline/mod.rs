@@ -68,6 +68,57 @@ impl PipelineError {
 }
 
 // ---------------------------------------------------------------------------
+// InitialState — cold start decision result
+// ---------------------------------------------------------------------------
+
+/// The initial state determined by cold start logic.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InitialState {
+    /// Gap exists between last checkpoint and chain tip — backfill needed.
+    Backfill { start_slot: u64, end_slot: u64 },
+    /// Fully caught up or fresh start — go straight to streaming.
+    Stream,
+}
+
+/// Pure function implementing the cold start decision tree.
+///
+/// Takes resolved slot values and returns the initial state without
+/// performing any I/O. This makes it trivially unit-testable.
+pub fn decide_initial_state(
+    last_checkpoint_slot: Option<u64>,
+    chain_tip: u64,
+    config_start_slot: Option<u64>,
+) -> Result<InitialState, PipelineError> {
+    match last_checkpoint_slot {
+        None => {
+            // Fresh start — no prior checkpoint
+            match config_start_slot {
+                Some(start) if start < chain_tip => Ok(InitialState::Backfill {
+                    start_slot: start,
+                    end_slot: chain_tip,
+                }),
+                _ => Ok(InitialState::Stream),
+            }
+        }
+        Some(last) => {
+            if last > chain_tip.saturating_add(1) {
+                Err(PipelineError::Fatal(format!(
+                    "checkpoint slot ({last}) ahead of chain tip ({chain_tip}). \
+                     Possible causes: wrong cluster, RPC behind, or misconfiguration."
+                )))
+            } else if last < chain_tip {
+                Ok(InitialState::Backfill {
+                    start_slot: last + 1,
+                    end_slot: chain_tip,
+                })
+            } else {
+                Ok(InitialState::Stream)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // StreamInterrupt — internal signal for streaming loop control flow
 // ---------------------------------------------------------------------------
 
@@ -176,7 +227,7 @@ impl BackfillProgress {
 pub struct PipelineOrchestrator {
     pool: PgPool,
     rpc: RpcClient,
-    decoder: Box<dyn SolarixDecoder>,
+    decoder: Arc<dyn SolarixDecoder>,
     writer: Arc<StorageWriter>,
     config: Config,
     cancel: CancellationToken,
@@ -186,7 +237,7 @@ impl PipelineOrchestrator {
     pub fn new(
         pool: PgPool,
         rpc: RpcClient,
-        decoder: Box<dyn SolarixDecoder>,
+        decoder: Arc<dyn SolarixDecoder>,
         writer: StorageWriter,
         config: Config,
         cancel: CancellationToken,
@@ -198,6 +249,119 @@ impl PipelineOrchestrator {
             writer: Arc::new(writer),
             config,
             cancel,
+        }
+    }
+
+    /// Determine the initial pipeline state based on existing checkpoints and chain tip.
+    pub async fn determine_initial_state(
+        &self,
+        _program_id: &str,
+        schema_name: &str,
+    ) -> Result<InitialState, PipelineError> {
+        // Read both checkpoint streams and take the max
+        let backfill_cp = self.writer.read_checkpoint(schema_name, "backfill").await?;
+        let realtime_cp = self.writer.read_checkpoint(schema_name, "realtime").await?;
+
+        let last_slot = [backfill_cp, realtime_cp]
+            .iter()
+            .filter_map(|cp| cp.as_ref().map(|c| c.last_slot))
+            .max();
+
+        let chain_tip = self.rpc.get_slot().await?;
+
+        let state = decide_initial_state(last_slot, chain_tip, self.config.start_slot)?;
+
+        match &state {
+            InitialState::Backfill {
+                start_slot,
+                end_slot,
+            } => {
+                info!(
+                    last_checkpoint = last_slot,
+                    chain_tip,
+                    gap_start = start_slot,
+                    gap_end = end_slot,
+                    "cold start: backfill required"
+                );
+            }
+            InitialState::Stream => {
+                info!(
+                    last_checkpoint = last_slot,
+                    chain_tip, "cold start: streaming from tip"
+                );
+            }
+        }
+
+        Ok(state)
+    }
+
+    /// Main entry point: determines initial state and runs the pipeline.
+    ///
+    /// For `Backfill`, runs concurrent backfill + streaming (Option C).
+    /// For `Stream`, enters streaming directly.
+    pub async fn run(
+        &self,
+        program_id: &str,
+        schema_name: &str,
+        idl: &Idl,
+    ) -> Result<(), PipelineError> {
+        if self.cancel.is_cancelled() {
+            return Ok(());
+        }
+
+        let initial = self
+            .determine_initial_state(program_id, schema_name)
+            .await?;
+
+        match initial {
+            InitialState::Stream => self.run_streaming(program_id, schema_name, idl).await,
+            InitialState::Backfill {
+                start_slot,
+                end_slot,
+            } => {
+                // Option C: run backfill + streaming concurrently.
+                // Both write to the same tables; INSERT ON CONFLICT DO NOTHING handles dedup.
+                let stream_cancel = self.cancel.child_token();
+                let stream_handle = {
+                    let orch2 = PipelineOrchestrator {
+                        pool: self.pool.clone(),
+                        rpc: self.rpc.clone(),
+                        decoder: Arc::clone(&self.decoder),
+                        writer: Arc::clone(&self.writer),
+                        config: self.config.clone(),
+                        cancel: stream_cancel.clone(),
+                    };
+                    let pid = program_id.to_string();
+                    let sn = schema_name.to_string();
+                    let idl_clone = idl.clone();
+                    tokio::spawn(async move { orch2.run_streaming(&pid, &sn, &idl_clone).await })
+                };
+
+                // Run backfill in the current task
+                let backfill_result = self
+                    .run_backfill(program_id, schema_name, idl, start_slot, end_slot)
+                    .await;
+
+                match backfill_result {
+                    Ok(()) => {
+                        info!("backfill complete, streaming continues");
+                        // Wait for streaming (exits on cancel or fatal error)
+                        match stream_handle.await {
+                            Ok(Ok(())) => Ok(()),
+                            Ok(Err(e)) => Err(e),
+                            Err(e) => Err(PipelineError::Fatal(format!(
+                                "streaming task panicked: {e}"
+                            ))),
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "backfill failed, cancelling streaming");
+                        stream_cancel.cancel();
+                        let _ = stream_handle.await;
+                        Err(e)
+                    }
+                }
+            }
         }
     }
 
@@ -1607,7 +1771,7 @@ mod tests {
         }
     }
 
-    fn make_orch_with_decoder(decoder: Box<dyn SolarixDecoder>) -> PipelineOrchestrator {
+    fn make_orch_with_decoder(decoder: Arc<dyn SolarixDecoder>) -> PipelineOrchestrator {
         // Create a minimal orchestrator — no real DB pool or RPC (not needed for decode tests)
         use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -1625,7 +1789,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_decode_transaction_top_level_match() {
-        let orch = make_orch_with_decoder(Box::new(MockDecoder));
+        let orch = make_orch_with_decoder(Arc::new(MockDecoder));
         let idl = make_test_idl();
         let program_id = "TargetProg";
         let tx = make_test_tx(program_id, true);
@@ -1645,7 +1809,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_decode_transaction_inner_instruction() {
-        let orch = make_orch_with_decoder(Box::new(MockDecoder));
+        let orch = make_orch_with_decoder(Arc::new(MockDecoder));
         let idl = make_test_idl();
         let program_id = "TargetProg";
         let tx = RpcTransaction {
@@ -1683,7 +1847,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_decode_transaction_no_match() {
-        let orch = make_orch_with_decoder(Box::new(MockDecoder));
+        let orch = make_orch_with_decoder(Arc::new(MockDecoder));
         let idl = make_test_idl();
         let program_id = "TargetProg";
         let tx = RpcTransaction {
@@ -1708,7 +1872,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_decode_transaction_failed_tx_skipped() {
-        let orch = make_orch_with_decoder(Box::new(MockDecoder));
+        let orch = make_orch_with_decoder(Arc::new(MockDecoder));
         let idl = make_test_idl();
         let program_id = "TargetProg";
         let tx = make_test_tx(program_id, false); // failed tx
@@ -1732,7 +1896,7 @@ mod tests {
         let writer = StorageWriter::new(pool.clone());
         let cancel = CancellationToken::new();
         let orch =
-            PipelineOrchestrator::new(pool, rpc, Box::new(MockDecoder), writer, config, cancel);
+            PipelineOrchestrator::new(pool, rpc, Arc::new(MockDecoder), writer, config, cancel);
 
         let idl = make_test_idl();
         let program_id = "TargetProg";
@@ -1829,5 +1993,113 @@ mod tests {
 
         let fatal = StreamInterrupt::Fatal(PipelineError::Fatal("test".into()));
         matches!(fatal, StreamInterrupt::Fatal(_));
+    }
+
+    // -----------------------------------------------------------------------
+    // Story 4.3: Cold start decision + shutdown tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_decide_initial_state_gap() {
+        // Checkpoint at slot 100, chain tip at 200 → backfill needed
+        let result = decide_initial_state(Some(100), 200, None);
+        assert_eq!(
+            result.expect("should succeed"),
+            InitialState::Backfill {
+                start_slot: 101,
+                end_slot: 200
+            }
+        );
+    }
+
+    #[test]
+    fn test_decide_initial_state_no_gap() {
+        // Checkpoint at chain tip → stream directly
+        let result = decide_initial_state(Some(200), 200, None);
+        assert_eq!(result.expect("should succeed"), InitialState::Stream);
+    }
+
+    #[test]
+    fn test_decide_initial_state_one_ahead() {
+        // Checkpoint 1 slot ahead of chain tip (within tolerance) → stream
+        let result = decide_initial_state(Some(201), 200, None);
+        assert_eq!(result.expect("should succeed"), InitialState::Stream);
+    }
+
+    #[test]
+    fn test_decide_initial_state_fresh_start() {
+        // No checkpoint, no start_slot → stream from tip
+        let result = decide_initial_state(None, 200, None);
+        assert_eq!(result.expect("should succeed"), InitialState::Stream);
+    }
+
+    #[test]
+    fn test_decide_initial_state_fresh_start_with_start_slot() {
+        // No checkpoint, start_slot=100, chain_tip=200 → backfill from 100
+        let result = decide_initial_state(None, 200, Some(100));
+        assert_eq!(
+            result.expect("should succeed"),
+            InitialState::Backfill {
+                start_slot: 100,
+                end_slot: 200
+            }
+        );
+    }
+
+    #[test]
+    fn test_decide_initial_state_fresh_start_slot_at_tip() {
+        // No checkpoint, start_slot == chain_tip → stream (nothing to backfill)
+        let result = decide_initial_state(None, 200, Some(200));
+        assert_eq!(result.expect("should succeed"), InitialState::Stream);
+    }
+
+    #[test]
+    fn test_decide_initial_state_checkpoint_ahead() {
+        // Checkpoint far ahead of chain tip → fatal error
+        let result = decide_initial_state(Some(300), 200, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PipelineError::Fatal(ref msg) if msg.contains("ahead of chain tip")),
+            "expected fatal error about checkpoint ahead, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_shutdown_config_defaults() {
+        let config = make_test_config();
+        assert_eq!(config.shutdown_drain_secs, 15);
+        assert_eq!(config.shutdown_db_flush_secs, 10);
+    }
+
+    #[test]
+    fn test_run_is_send() {
+        // Compile-time check that run() future is Send
+        fn _check(o: &PipelineOrchestrator) {
+            fn _require_send<T: Send>(_: &T) {}
+            let idl = serde_json::from_value::<Idl>(serde_json::json!({
+                "address": "11111111111111111111111111111111",
+                "metadata": { "name": "test", "version": "0.1.0", "spec": "0.1.0" },
+                "instructions": [],
+                "accounts": [],
+                "types": []
+            }))
+            .expect("test IDL");
+            let fut = o.run("prog", "schema", &idl);
+            _require_send(&fut);
+        }
+    }
+
+    #[test]
+    fn test_initial_state_debug_display() {
+        // Verify Debug derive works
+        let state = InitialState::Stream;
+        let _ = format!("{state:?}");
+
+        let state2 = InitialState::Backfill {
+            start_slot: 1,
+            end_slot: 2,
+        };
+        let _ = format!("{state2:?}");
     }
 }

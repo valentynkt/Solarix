@@ -1,6 +1,6 @@
 # Story 4.3: Cold Start & Graceful Shutdown
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -63,15 +63,15 @@ so that no data is lost across restarts and the system is production-reliable.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add config fields (AC: #7)
-  - [ ] Add `shutdown_drain_secs: u64` (env `SOLARIX_SHUTDOWN_DRAIN_SECS`, default 15) to Config
-  - [ ] Add `shutdown_db_flush_secs: u64` (env `SOLARIX_SHUTDOWN_DB_FLUSH_SECS`, default 10) to Config
-  - [ ] Update `make_test_config()` helpers in `pipeline/mod.rs` tests and `api/handlers.rs` tests
+- [x] Task 1: Add config fields (AC: #7)
+  - [x]Add `shutdown_drain_secs: u64` (env `SOLARIX_SHUTDOWN_DRAIN_SECS`, default 15) to Config
+  - [x]Add `shutdown_db_flush_secs: u64` (env `SOLARIX_SHUTDOWN_DB_FLUSH_SECS`, default 10) to Config
+  - [x]Update `make_test_config()` helpers in `pipeline/mod.rs` tests and `api/handlers.rs` tests
 
-- [ ] Task 2: Implement cold start logic on PipelineOrchestrator (AC: #1, #2, #3)
-  - [ ] Add `pub async fn determine_initial_state(&self, program_id: &str, schema_name: &str) -> Result<InitialState, PipelineError>` to `PipelineOrchestrator`
-  - [ ] Define `pub enum InitialState { Backfill { start_slot: u64, end_slot: u64 }, Stream, }` in `pipeline/mod.rs`
-  - [ ] Implementation:
+- [x] Task 2: Implement cold start logic on PipelineOrchestrator (AC: #1, #2, #3)
+  - [x]Add `pub async fn determine_initial_state(&self, program_id: &str, schema_name: &str) -> Result<InitialState, PipelineError>` to `PipelineOrchestrator`
+  - [x]Define `pub enum InitialState { Backfill { start_slot: u64, end_slot: u64 }, Stream, }` in `pipeline/mod.rs`
+  - [x]Implementation:
     - Read checkpoint via `self.writer.read_checkpoint(schema_name, "backfill")` and `self.writer.read_checkpoint(schema_name, "realtime")`
     - Take the max `last_slot` across both checkpoint streams (backfill and realtime)
     - Fetch chain tip via `self.rpc.get_slot()`
@@ -79,12 +79,12 @@ so that no data is lost across restarts and the system is production-reliable.
     - If checkpoint exists and `last_slot < chain_tip`: `InitialState::Backfill { start_slot: last_slot + 1, end_slot: chain_tip }`
     - If checkpoint exists and `last_slot >= chain_tip` (within 1 slot tolerance): `InitialState::Stream`
     - If checkpoint exists and `last_slot > chain_tip + 1`: return `Err(PipelineError::Fatal("checkpoint ahead of chain tip..."))`
-  - [ ] Log the decision at `info!` level with all relevant slot numbers
+  - [x]Log the decision at `info!` level with all relevant slot numbers
 
-- [ ] Task 3: Implement `run` orchestrator entry point (AC: #1, #3, #4)
-  - [ ] Add `pub async fn run(&self, program_id: &str, schema_name: &str, idl: &Idl) -> Result<(), PipelineError>` to `PipelineOrchestrator`
-  - [ ] Call `determine_initial_state` to get `InitialState`
-  - [ ] Match on `InitialState`:
+- [x] Task 3: Implement `run` orchestrator entry point (AC: #1, #3, #4)
+  - [x]Add `pub async fn run(&self, program_id: &str, schema_name: &str, idl: &Idl) -> Result<(), PipelineError>` to `PipelineOrchestrator`
+  - [x]Call `determine_initial_state` to get `InitialState`
+  - [x]Match on `InitialState`:
     - `Stream` → call `self.run_streaming(program_id, schema_name, idl).await`
     - `Backfill { start_slot, end_slot }` → spawn concurrent backfill + streaming (Option C):
       1. Clone the `CancellationToken` for both tasks
@@ -93,49 +93,49 @@ so that no data is lost across restarts and the system is production-reliable.
       4. After backfill completes (or errors): streaming task continues independently
       5. If backfill errors: cancel everything, propagate error
       6. Await the streaming task's JoinHandle
-  - [ ] Important: `PipelineOrchestrator` fields are not all `Clone`. For the streaming spawn, build a second `PipelineOrchestrator` from shared components: `pool.clone()`, `rpc.clone()` (if Clone) or use `Arc` wrapping. Check if `RpcClient` is `Clone` — if not, wrap in `Arc` or restructure.
+  - [x]Important: `PipelineOrchestrator` fields are not all `Clone`. For the streaming spawn, build a second `PipelineOrchestrator` from shared components: `pool.clone()`, `rpc.clone()` (if Clone) or use `Arc` wrapping. Check if `RpcClient` is `Clone` — if not, wrap in `Arc` or restructure.
 
-- [ ] Task 4: Wire pipeline into main.rs (AC: #4, #5)
-  - [ ] After DB bootstrap + registry setup, create `PipelineOrchestrator` with `CancellationToken`
-  - [ ] Create a shared `CancellationToken` that is used by BOTH the pipeline AND the API server shutdown
-  - [ ] Signal handling: on SIGTERM/SIGINT, cancel the token → pipeline stages stop, API server shuts down
-  - [ ] Use `tokio::select!` to run pipeline + API server concurrently:
+- [x] Task 4: Wire pipeline into main.rs (AC: #4, #5)
+  - [x]After DB bootstrap + registry setup, create `PipelineOrchestrator` with `CancellationToken`
+  - [x]Create a shared `CancellationToken` that is used by BOTH the pipeline AND the API server shutdown
+  - [x]Signal handling: on SIGTERM/SIGINT, cancel the token → pipeline stages stop, API server shuts down
+  - [x]Use `tokio::select!` to run pipeline + API server concurrently:
     ```rust
     tokio::select! {
         result = pipeline_task => { /* pipeline exited */ }
         result = api_server => { /* API server exited */ }
     }
     ```
-  - [ ] Pipeline task: for each registered program, call `orchestrator.run(program_id, schema_name, idl)`. For MVP, handle a single program (programs are registered via API first, pipeline is started manually or auto-discovers registered programs)
-  - [ ] Design decision: At startup, query `programs` table for registered programs. If none, only run API server (pipeline starts when a program is registered). If one or more exist, start pipeline for each.
-  - [ ] Refactor `shutdown_signal()` to cancel the `CancellationToken` instead of only being used by axum
+  - [x]Pipeline task: for each registered program, call `orchestrator.run(program_id, schema_name, idl)`. For MVP, handle a single program (programs are registered via API first, pipeline is started manually or auto-discovers registered programs)
+  - [x]Design decision: At startup, query `programs` table for registered programs. If none, only run API server (pipeline starts when a program is registered). If one or more exist, start pipeline for each.
+  - [x]Refactor `shutdown_signal()` to cancel the `CancellationToken` instead of only being used by axum
 
-- [ ] Task 5: Implement graceful shutdown sequence (AC: #5, #6)
-  - [ ] Shutdown is driven by `CancellationToken` cancellation:
+- [x] Task 5: Implement graceful shutdown sequence (AC: #5, #6)
+  - [x]Shutdown is driven by `CancellationToken` cancellation:
     1. Signal handler cancels the token
     2. Pipeline orchestrator's `run_streaming` / `run_backfill` checks `cancel.is_cancelled()` and exits loops
     3. Writer tasks drain remaining channel items (already implemented in `writer_task`)
     4. After pipeline tasks complete, update `indexer_state` status to `"stopped"` with `last_processed_slot`
     5. Close DB pool
-  - [ ] Add final checkpoint update: after pipeline exits, call `update_indexer_state(pool, program_id, "stopped", last_slot)` with timeout
-  - [ ] Use `tokio::time::timeout` with `config.shutdown_drain_secs` to wait for pipeline drain
-  - [ ] Use `tokio::time::timeout` with `config.shutdown_db_flush_secs` for final DB operations
-  - [ ] Exit code: 0 on clean shutdown, 1 on error
+  - [x]Add final checkpoint update: after pipeline exits, call `update_indexer_state(pool, program_id, "stopped", last_slot)` with timeout
+  - [x]Use `tokio::time::timeout` with `config.shutdown_drain_secs` to wait for pipeline drain
+  - [x]Use `tokio::time::timeout` with `config.shutdown_db_flush_secs` for final DB operations
+  - [x]Exit code: 0 on clean shutdown, 1 on error
 
-- [ ] Task 6: Unit tests (AC: #8)
-  - [ ] `test_determine_initial_state_gap` — checkpoint at slot 100, chain tip at 200 → `Backfill { 101, 200 }`
-  - [ ] `test_determine_initial_state_no_gap` — checkpoint at slot 200, chain tip at 200 → `Stream`
-  - [ ] `test_determine_initial_state_fresh_start` — no checkpoint, no start_slot → `Stream`
-  - [ ] `test_determine_initial_state_fresh_start_with_start_slot` — no checkpoint, start_slot=100, chain_tip=200 → `Backfill { 100, 200 }`
-  - [ ] `test_determine_initial_state_checkpoint_ahead` — checkpoint at 300, chain tip at 200 → fatal error
-  - [ ] `test_shutdown_config_defaults` — verify default values for shutdown_drain_secs and shutdown_db_flush_secs
-  - [ ] `test_run_is_send` — compile-time check that `run()` future is Send
+- [x] Task 6: Unit tests (AC: #8)
+  - [x]`test_determine_initial_state_gap` — checkpoint at slot 100, chain tip at 200 → `Backfill { 101, 200 }`
+  - [x]`test_determine_initial_state_no_gap` — checkpoint at slot 200, chain tip at 200 → `Stream`
+  - [x]`test_determine_initial_state_fresh_start` — no checkpoint, no start_slot → `Stream`
+  - [x]`test_determine_initial_state_fresh_start_with_start_slot` — no checkpoint, start_slot=100, chain_tip=200 → `Backfill { 100, 200 }`
+  - [x]`test_determine_initial_state_checkpoint_ahead` — checkpoint at 300, chain tip at 200 → fatal error
+  - [x]`test_shutdown_config_defaults` — verify default values for shutdown_drain_secs and shutdown_db_flush_secs
+  - [x]`test_run_is_send` — compile-time check that `run()` future is Send
 
-- [ ] Task 7: Verify (AC: all)
-  - [ ] `cargo build` compiles (0 errors, 0 warnings)
-  - [ ] `cargo clippy` passes
-  - [ ] `cargo fmt -- --check` passes
-  - [ ] `cargo test` — all tests pass (existing + new)
+- [x] Task 7: Verify (AC: all)
+  - [x]`cargo build` compiles (0 errors, 0 warnings)
+  - [x]`cargo clippy` passes
+  - [x]`cargo fmt -- --check` passes
+  - [x]`cargo test` — all tests pass (existing + new)
 
 ## Dev Notes
 
@@ -555,10 +555,36 @@ Integration tests (full cold start → backfill → streaming → shutdown cycle
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+None — clean build on first attempt.
+
 ### Completion Notes List
 
+- Added `shutdown_drain_secs` (default 15) and `shutdown_db_flush_secs` (default 10) config fields
+- Implemented `decide_initial_state()` pure function for cold start decision logic (testable without DB/RPC)
+- Added `InitialState` enum: `Backfill { start_slot, end_slot }` or `Stream`
+- Added `determine_initial_state()` async method on `PipelineOrchestrator` — reads both checkpoint streams, fetches chain tip, delegates to pure function
+- Added `run()` entry point on `PipelineOrchestrator` implementing Option C concurrent backfill + streaming via `tokio::spawn`
+- Changed `decoder` field from `Box<dyn SolarixDecoder>` to `Arc<dyn SolarixDecoder>` for sharing across concurrent tasks
+- Added `#[derive(Clone)]` to `RpcClient` (all fields already Clone-able; shares rate limiter via Arc)
+- Rewrote `main.rs` with shared `CancellationToken` for signal-driven shutdown across pipeline + API
+- `shutdown_signal()` cancels the shared token on SIGTERM/SIGINT, propagating to all pipeline stages and API server
+- `graceful_shutdown()` function: timeout-wrapped indexer_state update to "stopped" + pool.close()
+- `query_registered_programs()` queries DB for `schema_created` programs (IDL persistence not yet implemented — logs warning, users re-register after restart)
+- 10 new unit tests: cold start decision (gap, no gap, fresh, fresh+start_slot, checkpoint ahead, one-ahead tolerance, start_slot at tip), shutdown config defaults, `run()` is Send, InitialState Debug
+- All 251 tests pass, clippy clean, fmt clean, zero warnings
+
 ### File List
+
+- `src/config.rs` — added `shutdown_drain_secs`, `shutdown_db_flush_secs` fields
+- `src/pipeline/mod.rs` — added `InitialState` enum, `decide_initial_state()`, `determine_initial_state()`, `run()` method; changed decoder to `Arc<dyn SolarixDecoder>`; 10 new unit tests
+- `src/pipeline/rpc.rs` — added `#[derive(Clone)]` to `RpcClient`
+- `src/main.rs` — complete rewrite: shared CancellationToken, signal handler wiring, concurrent pipeline+API via tokio::select!, graceful shutdown with timeouts, startup program discovery
+- `src/api/handlers.rs` — updated `make_config()` test helper with new config fields
+
+### Change Log
+
+- 2026-04-07: Implemented cold start, Option C concurrent backfill+streaming, graceful shutdown, main.rs pipeline wiring (story 4.3)

@@ -234,6 +234,7 @@ pub trait AccountSource: Send + Sync {
 // RpcClient
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct RpcClient {
     http: Client,
     rpc_url: String,
