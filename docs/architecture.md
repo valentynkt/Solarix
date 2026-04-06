@@ -22,81 +22,53 @@ Detailed technical architecture of the Solarix universal Solana indexer.
 
 Solarix is a four-layer pipeline that reads Solana blockchain data, decodes it using Anchor IDLs, stores it in dynamically-generated PostgreSQL schemas, and serves it through a REST API.
 
-```mermaid
-graph TB
-    subgraph External
-        SOL[Solana RPC Node]
-        CLIENT[API Clients]
-    end
-
-    subgraph Solarix
-        subgraph "Read Layer"
-            RPC[RpcClient<br/>HTTP JSON-RPC]
-            WS[WsTransactionStream<br/>logsSubscribe]
-        end
-
-        subgraph "Decode Layer"
-            IDL[IdlManager<br/>fetch + cache + validate]
-            DEC[ChainparserDecoder<br/>Borsh type registry]
-        end
-
-        subgraph "Store Layer"
-            SCH[SchemaGenerator<br/>IDL → DDL]
-            WR[StorageWriter<br/>batch + upsert]
-        end
-
-        subgraph "Serve Layer"
-            API[axum Router<br/>12 endpoints]
-            QB[QueryBuilder<br/>dynamic SQL + filters]
-        end
-
-        PIPE[PipelineOrchestrator<br/>state machine]
-        REG[ProgramRegistry<br/>registration lifecycle]
-    end
-
-    DB[(PostgreSQL 16)]
-
-    SOL --> RPC
-    SOL --> WS
-    RPC --> PIPE
-    WS --> PIPE
-    PIPE --> DEC
-    IDL --> DEC
-    DEC --> WR
-    WR --> DB
-    SCH --> DB
-    REG --> IDL
-    REG --> SCH
-    API --> QB
-    QB --> DB
-    CLIENT --> API
+```
+ ┌─────────────────────────────────────────────────────────────────────────────────┐
+ │                                  SOLARIX                                       │
+ │                                                                                │
+ │  ┌─ Read ────────────┐  ┌─ Decode ──────────┐  ┌─ Store ──────────────────┐   │
+ │  │                    │  │                    │  │                          │   │
+ │  │  RpcClient         │  │  IdlManager        │  │  SchemaGenerator        │   │
+ │  │  (HTTP JSON-RPC)  ─┼──┼─►                  │  │  (IDL → DDL)            │   │
+ │  │                    │  │  ChainparserDecoder─┼──┼─► StorageWriter         │   │
+ │  │  WsTransactionStream│ │  (Borsh registry)  │  │     (batch + upsert)    │   │
+ │  │  (logsSubscribe)  ─┼──┼─►                  │  │                         │   │
+ │  │                    │  │                    │  │                    ┌─────┤   │
+ │  └────────────────────┘  └────────────────────┘  │                    │ DB  │   │
+ │                                                   └────────────────────┤     │   │
+ │  ┌─ Serve ───────────┐                                               │     │   │
+ │  │                    │          PipelineOrchestrator                  │PG16 │   │
+ │  │  axum Router      │           (state machine)                      │     │   │
+ │  │  12 endpoints    ─┼───────────────────────────────────────────────►│     │   │
+ │  │  QueryBuilder     │                                               │     │   │
+ │  │  (dynamic SQL)    │          ProgramRegistry                       └─────┤   │
+ │  └────────────────────┘          (registration lifecycle)                    │   │
+ │                                                                                │
+ └─────────────────────────────────────────────────────────────────────────────────┘
+          ▲                                                        ▲
+          │                                                        │
+     API Clients                                            Solana RPC Node
 ```
 
 ### Startup Sequence
 
-```mermaid
-sequenceDiagram
-    participant M as main.rs
-    participant DB as PostgreSQL
-    participant API as axum Server
-    participant P as PipelineOrchestrator
-
-    M->>DB: init_pool() + bootstrap_system_tables()
-    M->>DB: SELECT FROM programs WHERE status = 'schema_created'
-    alt No registered programs
-        M->>API: Start API-only mode
-        Note right of API: Serves /health + POST /api/programs
-    else Programs found
-        M->>API: Spawn API server task
-        M->>P: Spawn pipeline task
-        par API handles requests
-            API->>DB: Query endpoints
-        and Pipeline indexes data
-            P->>P: decide_initial_state()
-            P->>DB: Read checkpoint
-            P->>P: Run backfill + streaming
-        end
-    end
+```
+main.rs
+  │
+  ├─► init_pool() + bootstrap_system_tables()
+  │
+  ├─► SELECT FROM programs WHERE status = 'schema_created'
+  │
+  ├─► No programs found?
+  │     └─► Start API-only mode (serves /health + POST /api/programs)
+  │
+  └─► Programs found?
+        ├─► Spawn API server task ──────► handles requests ──► DB queries
+        │
+        └─► Spawn pipeline task
+              ├─► decide_initial_state()
+              ├─► Read checkpoint from DB
+              └─► Run backfill + streaming concurrently
 ```
 
 ---
@@ -107,24 +79,24 @@ sequenceDiagram
 
 The pipeline operates as a 5-state machine with well-defined transitions:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Initializing : startup
-
-    Initializing --> Backfilling : checkpoint_slot < chain_tip
-    Initializing --> Streaming : checkpoint_slot == chain_tip OR no checkpoint
-
-    state "Concurrent Processing" as concurrent {
-        Backfilling --> Streaming : backfill complete
-        Streaming --> CatchingUp : gap detected (slot jump)
-        CatchingUp --> Streaming : gap filled
-    }
-
-    Backfilling --> ShuttingDown : SIGTERM/SIGINT
-    Streaming --> ShuttingDown : SIGTERM/SIGINT
-    CatchingUp --> ShuttingDown : SIGTERM/SIGINT
-
-    ShuttingDown --> [*] : drain + flush complete
+```
+                                 checkpoint < tip
+                ┌──────────────┐ ──────────────────► ┌──────────────┐
+                │ Initializing │                     │ Backfilling  │
+                └──────┬───────┘                     └──────┬───────┘
+                       │ no gap                       caught up │
+                       ▼                                        ▼
+                ┌──────────────┐    gap detected     ┌──────────────┐
+                │              │ ◄────────────────── │              │
+                │  Streaming   │                     │  CatchingUp  │
+                │              │ ──────────────────► │              │
+                └──────┬───────┘    gap filled       └──────────────┘
+                       │
+                       │ SIGTERM / SIGINT
+                       ▼
+                ┌──────────────┐
+                │ ShuttingDown │ ──► drain channels ──► flush DB ──► exit
+                └──────────────┘
 ```
 
 ### Cold Start Decision
@@ -143,18 +115,23 @@ The `decide_initial_state()` function is a **pure function** (no I/O) that deter
 
 During cold start, both the backfill and streaming paths run simultaneously:
 
-```mermaid
-graph LR
-    subgraph "Backfill Path"
-        B1[getBlocks<br/>slot range] --> B2[getBlock<br/>per slot] --> B3[Decode] --> B4[Write<br/>ON CONFLICT<br/>DO NOTHING]
-    end
+```
+  Backfill Path                                    Streaming Path
 
-    subgraph "Streaming Path"
-        S1[logsSubscribe<br/>WebSocket] --> S2[getTransaction<br/>per signature] --> S3[Decode] --> S4[Write<br/>ON CONFLICT<br/>DO NOTHING]
-    end
-
-    B4 --> DB[(Same tables)]
-    S4 --> DB
+  getBlocks(range)                                 logsSubscribe (WebSocket)
+       │                                                │
+       ▼                                                ▼
+  getBlock(slot)                                   getTransaction(sig)
+       │                                                │
+       ▼                                                ▼
+  Decode (Borsh → JSON)                            Decode (Borsh → JSON)
+       │                                                │
+       ▼                                                ▼
+  INSERT ... ON CONFLICT DO NOTHING ──────►  Same tables  ◄── INSERT ... ON CONFLICT DO NOTHING
+                                                   │
+                                            ┌──────┴──────┐
+                                            │ PostgreSQL  │
+                                            └─────────────┘
 ```
 
 Both paths write to identical tables with `INSERT ... ON CONFLICT DO NOTHING`. Signature-based dedup ensures no duplicate data. If Solarix crashes and restarts, both paths resume from their respective checkpoints.
@@ -189,77 +166,50 @@ While streaming, if the received slot jumps beyond `last_slot + 1`, the pipeline
 
 Each registered program gets its own PostgreSQL schema:
 
-```mermaid
-erDiagram
-    public_programs {
-        varchar program_id PK
-        text program_name
-        text schema_name UK
-        varchar idl_hash
-        text idl_source
-        text status
-        timestamptz created_at
-        timestamptz updated_at
-    }
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │ public schema                                               │
+  │                                                             │
+  │  programs                        indexer_state              │
+  │  ┌─────────────────────┐         ┌────────────────────────┐ │
+  │  │ program_id (PK)     │────────►│ program_id (FK)        │ │
+  │  │ program_name        │         │ status                 │ │
+  │  │ schema_name (UNIQ)  │         │ last_processed_slot    │ │
+  │  │ idl_hash            │         │ last_heartbeat         │ │
+  │  │ idl_source          │         │ total_instructions     │ │
+  │  │ status              │         │ total_accounts         │ │
+  │  │ created_at          │         │ error_message          │ │
+  │  │ updated_at          │         └────────────────────────┘ │
+  │  └─────────────────────┘                                    │
+  └─────────────────────────────────────────────────────────────┘
 
-    public_indexer_state {
-        varchar program_id FK
-        text status
-        bigint last_processed_slot
-        timestamptz last_heartbeat
-        text error_message
-        bigint total_instructions
-        bigint total_accounts
-    }
-
-    public_programs ||--o| public_indexer_state : "tracks"
+  ┌─────────────────────────────────────────────────────────────┐
+  │ jupiter_v6_jup6lkmu schema   (one schema per program)      │
+  │                                                             │
+  │  pool (account table)      token_ledger (account table)     │
+  │  ┌──────────────────┐      ┌──────────────────┐            │
+  │  │ pubkey (PK)      │      │ pubkey (PK)      │            │
+  │  │ slot_updated     │      │ slot_updated     │            │
+  │  │ lamports         │      │ lamports         │            │
+  │  │ data (JSONB)     │      │ data (JSONB)     │            │
+  │  │ token_a_mint     │      │ owner            │   ...      │
+  │  │ fee_rate         │      │ balance          │            │
+  │  └──────────────────┘      └──────────────────┘            │
+  │                                                             │
+  │  _instructions (append-only)    _checkpoints    _metadata   │
+  │  ┌──────────────────────┐  ┌──────────────┐  ┌──────────┐ │
+  │  │ id (PK, BIGSERIAL)   │  │ stream (PK)  │  │ ix_name  │ │
+  │  │ signature             │  │ last_slot    │  │ field    │ │
+  │  │ slot                  │  │ last_sig     │  │ type     │ │
+  │  │ instruction_name      │  │ updated_at   │  │ is_acct  │ │
+  │  │ args (JSONB)          │  └──────────────┘  └──────────┘ │
+  │  │ accounts (JSONB)      │                                  │
+  │  │ data (JSONB)          │                                  │
+  │  └──────────────────────┘                                   │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-Program-specific schemas follow the naming pattern `{sanitized_name}_{first_8_program_id}` to prevent collisions:
-
-```sql
--- Example: registering Jupiter v6
-CREATE SCHEMA IF NOT EXISTS "jupiter_v6_jup6lkmu";
-
--- Account tables (one per IDL account type)
-CREATE TABLE IF NOT EXISTS "jupiter_v6_jup6lkmu"."pool" (
-    pubkey          TEXT PRIMARY KEY,
-    slot_updated    BIGINT NOT NULL,
-    write_version   BIGINT NOT NULL DEFAULT 0,
-    lamports        BIGINT NOT NULL,
-    data            JSONB NOT NULL,
-    is_closed       BOOLEAN NOT NULL DEFAULT FALSE,
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- Promoted columns (simple scalars from IDL)
-    token_a_mint    TEXT,
-    token_b_mint    TEXT,
-    fee_rate        INTEGER
-);
-
--- GIN index for JSONB queries
-CREATE INDEX IF NOT EXISTS idx_jupiter_v6_jup6lkmu_pool_data
-    ON "jupiter_v6_jup6lkmu"."pool" USING GIN(data jsonb_path_ops);
-
--- Unified instructions table (append-only)
-CREATE TABLE IF NOT EXISTS "jupiter_v6_jup6lkmu"."_instructions" (
-    id                  BIGSERIAL PRIMARY KEY,
-    signature           TEXT NOT NULL,
-    slot                BIGINT NOT NULL,
-    block_time          BIGINT,
-    instruction_name    TEXT NOT NULL,
-    instruction_index   SMALLINT NOT NULL,
-    inner_index         SMALLINT,
-    args                JSONB NOT NULL,
-    accounts            JSONB NOT NULL,
-    data                JSONB NOT NULL,
-    is_inner_ix         BOOLEAN NOT NULL DEFAULT FALSE
-);
-
--- Dedup index
-CREATE UNIQUE INDEX IF NOT EXISTS idx_jupiter_v6_jup6lkmu__instructions_sig_ix
-    ON "jupiter_v6_jup6lkmu"."_instructions"
-    (signature, instruction_index, COALESCE(inner_index, -1));
-```
+Schema naming pattern: `{sanitized_name}_{first_8_program_id}` prevents collisions when different programs share the same IDL name.
 
 ### Promoted Column Strategy
 
@@ -313,69 +263,53 @@ Checkpoints are updated atomically within the same transaction as block writes, 
 
 Four trait interfaces define the architectural boundaries. Each is mockable for unit testing:
 
-```mermaid
-graph TB
-    subgraph "decoder/mod.rs"
-        SD["trait SolarixDecoder<br/>+ Send + Sync"]
-    end
-
-    subgraph "pipeline/rpc.rs"
-        BS["trait BlockSource<br/>+ Send + Sync"]
-        AS["trait AccountSource<br/>+ Send + Sync"]
-    end
-
-    subgraph "pipeline/ws.rs"
-        TS["trait TransactionStream<br/>+ Send + Sync"]
-    end
-
-    subgraph Implementations
-        CD[ChainparserDecoder]
-        RC[RpcClient]
-        WTS[WsTransactionStream]
-    end
-
-    CD -.->|implements| SD
-    RC -.->|implements| BS
-    RC -.->|implements| AS
-    WTS -.->|implements| TS
 ```
+  Trait                    Defined In          Implemented By
+  ─────────────────────    ─────────────────   ──────────────────────
+  SolarixDecoder           decoder/mod.rs      ChainparserDecoder
+    + Send + Sync
+    decode_instruction()
+    decode_account()
 
-| Trait               | Methods                                             | Purpose                            |
-| ------------------- | --------------------------------------------------- | ---------------------------------- |
-| `SolarixDecoder`    | `decode_instruction()`, `decode_account()`          | Borsh bytes → typed JSON           |
-| `BlockSource`       | `get_block()`, `get_slot()`                         | Block fetching abstraction         |
-| `AccountSource`     | `get_program_accounts()`, `get_multiple_accounts()` | Account fetching abstraction       |
-| `TransactionStream` | `connect()`                                         | WebSocket subscription abstraction |
+  BlockSource              pipeline/rpc.rs     RpcClient
+    + Send + Sync
+    get_block()
+    get_slot()
+
+  AccountSource            pipeline/rpc.rs     RpcClient
+    + Send + Sync
+    get_program_accounts()
+    get_multiple_accounts()
+
+  TransactionStream        pipeline/ws.rs      WsTransactionStream
+    + Send + Sync
+    connect()
+```
 
 ### Dependency Graph
 
-```mermaid
-graph BT
-    types[types.rs]
-    config[config.rs]
-    idl[idl/]
-    decoder[decoder/]
-    registry[registry.rs]
-    pipeline[pipeline/]
-    storage[storage/]
-    api[api/]
-    main[main.rs]
-
-    idl --> types
-    decoder --> types
-    decoder --> idl
-    registry --> idl
-    registry --> storage
-    pipeline --> decoder
-    pipeline --> storage
-    pipeline --> types
-    storage --> types
-    api --> storage
-    api --> registry
-    main --> api
-    main --> pipeline
-    main --> registry
-    main --> config
+```
+                    ┌──────────┐
+                    │ main.rs  │
+                    └────┬─────┘
+                         │
+            ┌────────────┼────────────┐
+            ▼            ▼            ▼
+       ┌─────────┐ ┌──────────┐ ┌──────────┐
+       │  api/   │ │ pipeline/│ │ registry │
+       └────┬────┘ └────┬─────┘ └────┬─────┘
+            │           │             │
+            │      ┌────┴────┐        │
+            │      ▼         ▼        │
+            │ ┌────────┐ ┌────────┐   │
+            │ │decoder/│ │storage/│◄──┘
+            │ └────┬───┘ └────┬───┘
+            │      │          │
+            └──────┼──────────┘
+                   ▼
+              ┌─────────┐     ┌──────────┐
+              │ types.rs │     │ config.rs│
+              └──────────┘     └──────────┘
 ```
 
 No circular dependencies. The `types` module sits at the bottom with shared data structures. Modules only depend downward.
@@ -386,27 +320,42 @@ No circular dependencies. The `types` module sits at the bottom with shared data
 
 ### Fetch Cascade
 
-```mermaid
-graph TD
-    START[Register program_id] --> CACHE{IDL in cache?}
-    CACHE -->|yes| DONE[Use cached IDL]
-    CACHE -->|no| MANUAL{Manual upload<br/>provided?}
-    MANUAL -->|yes| PARSE[Parse + validate]
-    MANUAL -->|no| ONCHAIN[Fetch from on-chain PDA]
-
-    ONCHAIN --> PDA["Derive PDA:<br/>seeds = ['anchor:idl', program_id]"]
-    PDA --> RPC[getAccountInfo]
-    RPC --> DECOMPRESS["Parse binary layout:<br/>[8B disc][32B authority][4B len][zlib]"]
-    DECOMPRESS --> PARSE
-
-    ONCHAIN -->|NotFound| BUNDLED["Check bundled IDLs:<br/>idls/{program_id}.json"]
-    BUNDLED -->|found| PARSE
-    BUNDLED -->|not found| ERROR[IdlError::NotFound]
-
-    PARSE --> VALIDATE{"v0.30+ format?<br/>(metadata.spec exists)"}
-    VALIDATE -->|yes| HASH[SHA-256 hash on<br/>canonical JSON]
-    VALIDATE -->|no| REJECT[IdlError::UnsupportedFormat]
-    HASH --> DONE
+```
+  Register program_id
+         │
+         ▼
+    IDL in cache? ─── yes ──► Use cached IDL ──► Done
+         │ no
+         ▼
+    Manual upload provided? ─── yes ──► Parse + validate ──┐
+         │ no                                               │
+         ▼                                                  │
+    Fetch from on-chain PDA                                 │
+    seeds = ["anchor:idl", program_id]                      │
+         │                                                  │
+         ├── getAccountInfo ──► parse binary ──► decompress ┤
+         │                      [8B disc]                   │
+         │                      [32B authority]             │
+         │                      [4B len]                    │
+         │                      [zlib payload]              │
+         │                                                  │
+         ├── NotFound ──► Check bundled: idls/{id}.json ──┤
+         │                      │                           │
+         │                  not found                       │
+         │                      │                           │
+         │                      ▼                           ▼
+         │              IdlError::NotFound      Validate v0.30+ format
+         │                                      (metadata.spec exists)
+         │                                              │
+         │                                   ┌──────────┼──────────┐
+         │                                   │ yes                 │ no
+         │                                   ▼                     ▼
+         │                            SHA-256 hash          UnsupportedFormat
+         │                            canonical JSON
+         │                                   │
+         └───────────────────────────────────►│
+                                              ▼
+                                          Cached + Done
 ```
 
 ### IDL Account Binary Layout
@@ -461,23 +410,40 @@ The decoder first reads 8 bytes from the data, matches against pre-computed disc
 
 ### Write Path
 
-```mermaid
-sequenceDiagram
-    participant P as Pipeline
-    participant W as StorageWriter
-    participant DB as PostgreSQL
-
-    P->>W: write_block(schema, instructions, accounts, slot)
-    W->>DB: BEGIN
-    W->>DB: INSERT INTO _instructions<br/>VALUES ($1...$N)<br/>ON CONFLICT DO NOTHING
-    loop Each account type
-        W->>W: Discover promoted columns<br/>(cached after first query)
-        W->>W: Extract promoted values<br/>from JSONB data
-        W->>DB: INSERT INTO {type}<br/>ON CONFLICT (pubkey)<br/>DO UPDATE SET ...
-    end
-    W->>DB: INSERT INTO _checkpoints<br/>ON CONFLICT DO UPDATE
-    W->>DB: COMMIT
-    W-->>P: WriteResult
+```
+  Pipeline                    StorageWriter                  PostgreSQL
+     │                              │                             │
+     │  write_block(schema,         │                             │
+     │   instructions, accounts,    │                             │
+     │   slot)                      │                             │
+     │─────────────────────────────►│                             │
+     │                              │  BEGIN                      │
+     │                              │────────────────────────────►│
+     │                              │                             │
+     │                              │  INSERT INTO _instructions  │
+     │                              │  VALUES ($1...$N)           │
+     │                              │  ON CONFLICT DO NOTHING     │
+     │                              │────────────────────────────►│
+     │                              │                             │
+     │                              │  ┌─ for each account type ─┐│
+     │                              │  │ discover promoted cols  ││
+     │                              │  │ (cached after 1st query)││
+     │                              │  │ extract promoted values ││
+     │                              │  │                         ││
+     │                              │  │ INSERT INTO {type}      ││
+     │                              │  │ ON CONFLICT (pubkey)    ││
+     │                              │  │ DO UPDATE SET ...       ││
+     │                              │  └─────────────────────────┘│
+     │                              │────────────────────────────►│
+     │                              │                             │
+     │                              │  INSERT INTO _checkpoints   │
+     │                              │  ON CONFLICT DO UPDATE      │
+     │                              │────────────────────────────►│
+     │                              │                             │
+     │                              │  COMMIT                     │
+     │                              │────────────────────────────►│
+     │                              │                             │
+     │◄─────────────────────────────│  WriteResult                │
 ```
 
 ### Instruction Batch Insert
@@ -494,18 +460,26 @@ Accounts use `INSERT ... ON CONFLICT (pubkey) DO UPDATE` to maintain latest stat
 
 ### Request Flow
 
-```mermaid
-graph LR
-    REQ[HTTP Request] --> ROUTER[axum Router]
-    ROUTER --> HANDLER[Handler Function]
-    HANDLER --> REGISTRY{Needs IDL?}
-    REGISTRY -->|yes| REG[ProgramRegistry<br/>read lock]
-    REG --> FILTER[Parse Filters<br/>validate vs IDL]
-    REGISTRY -->|no| QUERY
-    FILTER --> QUERY[QueryBuilder<br/>dynamic SQL]
-    QUERY --> DB[(PostgreSQL)]
-    DB --> SERIALIZE[JSON Response]
-    SERIALIZE --> RES[HTTP Response]
+```
+  HTTP Request
+       │
+       ▼
+  axum Router ──► Handler Function
+                       │
+                       ├── Needs IDL? ── yes ──► ProgramRegistry (read lock)
+                       │                              │
+                       │                              ▼
+                       │                         Parse Filters
+                       │                         (validate vs IDL)
+                       │                              │
+                       ▼                              ▼
+                  QueryBuilder (dynamic SQL)
+                       │
+                       ▼
+                  PostgreSQL
+                       │
+                       ▼
+                  JSON Response ──► HTTP Response
 ```
 
 ### Filter Resolution
@@ -538,15 +512,16 @@ WHERE "data" @> $1::jsonb
 
 ### Error Enum Hierarchy
 
-```mermaid
-graph TD
-    PE[PipelineError] --> DE[DecodeError]
-    PE --> SE[StorageError]
-    PE --> IE[IdlError]
+```
+  PipelineError
+    ├── DecodeError      (from decoder/)
+    ├── StorageError     (from storage/)
+    └── IdlError         (from idl/)
 
-    AE[ApiError] --> RE[RegistrationError]
-    RE --> IE2[IdlError]
-    RE --> SE2[StorageError]
+  ApiError
+    └── RegistrationError
+          ├── IdlError
+          └── StorageError
 ```
 
 Five module-level error enums, each with classification:
@@ -562,14 +537,14 @@ Five module-level error enums, each with classification:
 ### Error Classification Strategy
 
 ```
-retryable       → exponential backoff, retry up to timeout
-                  Examples: 429 rate limit, network timeout, WS disconnect
+retryable       --> exponential backoff, retry up to timeout
+                    Examples: 429 rate limit, network timeout, WS disconnect
 
-skip-and-log    → warn! level, continue processing
-                  Examples: unknown discriminator, decode failure on single tx
+skip-and-log    --> warn! level, continue processing
+                    Examples: unknown discriminator, decode failure on single tx
 
-fatal           → error! level, halt pipeline
-                  Examples: DB unreachable, invalid config, checkpoint > chain tip
+fatal           --> error! level, halt pipeline
+                    Examples: DB unreachable, invalid config, checkpoint > chain tip
 ```
 
 Decode failures are tracked per-batch. If >90% of transactions in a chunk fail to decode, it escalates to `error!` level (probable IDL mismatch rather than individual data issues).
@@ -580,17 +555,29 @@ Decode failures are tracked per-batch. If >90% of transactions in a chunk fail t
 
 ### Shared State
 
-```mermaid
-graph TD
-    subgraph "Arc<RwLock<ProgramRegistry>>"
-        REG[ProgramRegistry]
-        IDL[IdlManager + caches]
-    end
-
-    API1[API Handler 1] -->|read lock| REG
-    API2[API Handler 2] -->|read lock| REG
-    REGISTER[Register Handler] -->|write lock<br/>rare| REG
-    PIPELINE[Pipeline] -->|read via<br/>owned clone| IDL
+```
+  ┌──────────────────────────────────────────┐
+  │       Arc<RwLock<ProgramRegistry>>       │
+  │  ┌──────────────────────────────────┐    │
+  │  │  ProgramRegistry                 │    │
+  │  │  ├── IdlManager + caches         │    │
+  │  │  └── program status tracking     │    │
+  │  └──────────────────────────────────┘    │
+  └────────────┬─────────────┬───────────────┘
+               │             │
+    ┌──────────┴──┐   ┌──────┴──────────┐
+    │ read lock   │   │ write lock      │
+    │ (concurrent)│   │ (rare)          │
+    ▼             │   ▼                 │
+  API Handler 1   │ Register Handler    │
+  API Handler 2   │                     │
+  API Handler N   │                     │
+                  │                     │
+                  │ Pipeline receives   │
+                  │ owned IDL clone     │
+                  │ at startup — no     │
+                  │ lock contention     │
+                  └─────────────────────┘
 ```
 
 - **Read lock**: All query handlers, IDL lookups — concurrent, no contention
@@ -600,35 +587,41 @@ graph TD
 ### Channel Architecture
 
 ```
-RpcClient ──→ [mpsc(256)] ──→ Decoder ──→ [mpsc(256)] ──→ StorageWriter
-                                                              ↓
-WsStream  ──→ [mpsc(256)] ──→ Decoder ──→ [mpsc(256)] ──→ StorageWriter
-                                                              ↓
-                                                         PostgreSQL
+  RpcClient ──► [mpsc(256)] ──► Decoder ──► [mpsc(256)] ──► StorageWriter ──► PostgreSQL
+                                                                  ▲
+  WsStream  ──► [mpsc(256)] ──► Decoder ──► [mpsc(256)] ─────────┘
 ```
 
 Bounded `tokio::sync::mpsc` channels (capacity 256) provide backpressure between stages. If the writer falls behind, senders block, naturally throttling the reader.
 
 ### Shutdown Protocol
 
-```mermaid
-sequenceDiagram
-    participant SIG as Signal Handler
-    participant CT as CancellationToken
-    participant API as API Server
-    participant PIPE as Pipeline
-    participant DB as PostgreSQL
-
-    SIG->>CT: cancel()
-    par Graceful shutdown
-        CT->>API: Stop accepting requests
-        CT->>PIPE: Stop fetching new blocks
-    end
-    PIPE->>PIPE: Drain in-flight messages<br/>(15s timeout)
-    PIPE->>DB: Flush pending writes<br/>(10s timeout)
-    PIPE->>DB: Update indexer_state → 'stopped'
-    API->>API: Finish in-flight requests
-    DB->>DB: pool.close()
+```
+  SIGTERM / SIGINT
+       │
+       ▼
+  CancellationToken.cancel()
+       │
+       ├──────────────────────────────────┐
+       ▼                                  ▼
+  API Server                         Pipeline
+  stop accepting                     stop fetching
+  new requests                       new blocks
+                                          │
+                                          ▼
+                                     Drain in-flight
+                                     messages (15s timeout)
+                                          │
+                                          ▼
+                                     Flush pending writes
+                                     to DB (10s timeout)
+                                          │
+                                          ▼
+                                     UPDATE indexer_state
+                                     SET status = 'stopped'
+                                          │
+                                          ▼
+                                     pool.close()
 ```
 
 The `CancellationToken` from `tokio-util` propagates shutdown across all tasks. Configurable timeouts prevent hung shutdown.

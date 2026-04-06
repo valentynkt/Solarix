@@ -439,6 +439,7 @@ impl PipelineOrchestrator {
                     idl,
                     *chunk_start,
                     *chunk_end,
+                    "backfill",
                     &tx,
                     &mut progress,
                 )
@@ -507,6 +508,7 @@ impl PipelineOrchestrator {
         idl: &Idl,
         chunk_start: u64,
         chunk_end: u64,
+        stream_name: &str,
         tx: &mpsc::Sender<WriteBatch>,
         progress: &mut BackfillProgress,
     ) -> Result<(), PipelineError> {
@@ -538,7 +540,7 @@ impl PipelineOrchestrator {
 
                 let batch = WriteBatch {
                     schema_name: schema_name.to_string(),
-                    stream: "backfill".to_string(),
+                    stream: stream_name.to_string(),
                     instructions,
                     accounts: Vec::new(),
                     slot: block.slot,
@@ -788,14 +790,15 @@ impl PipelineOrchestrator {
         use crate::pipeline::ws::{TransactionStream, WsTransactionStream};
         use backon::{ExponentialBuilder, Retryable};
 
+        // Initial connection
+        let mut stream = WsTransactionStream::new(&self.config);
+        stream.subscribe(program_id).await?;
+
         loop {
             if self.cancel.is_cancelled() {
                 return Ok(());
             }
 
-            // Create + subscribe WS
-            let mut stream = WsTransactionStream::new(&self.config);
-            stream.subscribe(program_id).await?;
             update_indexer_state(&self.pool, program_id, "streaming", None).await?;
 
             // Streaming loop — returns disconnect slot or clean exit
@@ -805,7 +808,14 @@ impl PipelineOrchestrator {
             {
                 Ok(()) => return Ok(()), // clean exit (cancelled)
                 Err(StreamInterrupt::Disconnect(slot)) => slot,
-                Err(StreamInterrupt::Fatal(e)) => return Err(e),
+                Err(StreamInterrupt::Fatal(e)) => {
+                    if let Err(update_err) =
+                        update_indexer_state(&self.pool, program_id, "error", None).await
+                    {
+                        warn!(error = %update_err, "failed to set indexer_state to error");
+                    }
+                    return Err(e);
+                }
             };
 
             // CatchingUp
@@ -820,7 +830,7 @@ impl PipelineOrchestrator {
                 warn!(error = %e, "failed to set indexer_state to catching_up");
             }
 
-            // Reconnect with backon retry
+            // Reconnect with backon retry — reuse the reconnected stream
             let reconnect_result: Result<WsTransactionStream, PipelineError> = (|| async {
                 let mut new_stream = WsTransactionStream::new(&self.config);
                 new_stream.subscribe(program_id).await?;
@@ -842,11 +852,20 @@ impl PipelineOrchestrator {
             .await;
 
             match reconnect_result {
-                Ok(_new_stream) => {
-                    // Mini-backfill: fill the gap between disconnect and current tip
-                    self.mini_backfill(program_id, schema_name, idl, disconnect_slot)
-                        .await?;
-                    // Loop back to create a fresh stream for the Streaming state
+                Ok(new_stream) => {
+                    stream = new_stream;
+
+                    // Mini-backfill: fill the gap (skip if no reference point)
+                    if disconnect_slot > 0 {
+                        self.mini_backfill(program_id, schema_name, idl, disconnect_slot)
+                            .await?;
+                    } else {
+                        warn!(
+                            "disconnect_slot is 0 (no data processed before disconnect), \
+                             skipping mini-backfill"
+                        );
+                    }
+                    // Loop back to Streaming state using the reconnected stream
                 }
                 Err(e) => {
                     error!(error = %e, "WebSocket reconnection failed after retry timeout");
@@ -1029,7 +1048,6 @@ impl PipelineOrchestrator {
                 break;
             }
 
-            // Use "catchup" stream name for mini-backfill checkpoint tracking
             match self
                 .process_chunk(
                     program_id,
@@ -1037,6 +1055,7 @@ impl PipelineOrchestrator {
                     idl,
                     *chunk_start,
                     *chunk_end,
+                    "catchup",
                     &tx,
                     &mut progress,
                 )
@@ -1989,10 +2008,10 @@ mod tests {
     fn test_stream_interrupt_variants() {
         // Verify StreamInterrupt can hold both variants
         let disconnect = StreamInterrupt::Disconnect(12345);
-        matches!(disconnect, StreamInterrupt::Disconnect(12345));
+        assert!(matches!(disconnect, StreamInterrupt::Disconnect(12345)));
 
         let fatal = StreamInterrupt::Fatal(PipelineError::Fatal("test".into()));
-        matches!(fatal, StreamInterrupt::Fatal(_));
+        assert!(matches!(fatal, StreamInterrupt::Fatal(_)));
     }
 
     // -----------------------------------------------------------------------

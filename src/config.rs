@@ -93,7 +93,8 @@ pub struct Config {
     #[arg(
         long,
         env = "SOLARIX_MAX_CONSECUTIVE_FETCH_FAILURES",
-        default_value_t = 100
+        default_value_t = 100,
+        value_parser = parse_nonzero_u64
     )]
     pub max_consecutive_fetch_failures: u64,
 
