@@ -1,6 +1,6 @@
 # Story 5.1: Program Management Endpoints
 
-Status: done
+Status: done (review findings resolved 2026-04-06)
 
 ## Story
 
@@ -111,17 +111,17 @@ so that I can manage which programs are indexed without touching the database di
 
 ### Review Findings
 
-- [ ] [Review][Decision] #1 Auto-fetch path not implemented (AC2) — `POST /api/programs` with no IDL body returns IDL_ERROR 422 instead of triggering on-chain -> bundled fetch cascade. Infrastructure exists (`fetch_idl_standalone`, `IdlFetchParams`) but is never called from the handler. [src/registry.rs:92] [src/api/handlers.rs:82]
-- [ ] [Review][Decision] #2 Response status is "schema_created" not "registered" (AC2) — API returns `program_info.status` which is updated to `"schema_created"` after schema gen. AC2 specifies `"status": "registered"`. [src/api/handlers.rs:116] [src/registry.rs:175]
-- [ ] [Review][Patch] #3 `DROP SCHEMA` uses `format!` instead of `quote_ident()` [src/api/handlers.rs:251]
-- [ ] [Review][Patch] #4 `seed_metadata` uses SQL string interpolation instead of parameterized queries [src/storage/schema.rs:417-427]
-- [ ] [Review][Patch] #5 No `program_id` validation — accepts empty strings, non-base58, arbitrary length [src/api/handlers.rs:73]
-- [ ] [Review][Patch] #6 Hard delete not transactional — DROP SCHEMA + DELETE indexer_state + DELETE programs are separate statements [src/api/handlers.rs:251-267]
-- [ ] [Review][Patch] #8 Soft delete missing `updated_at = NOW()` [src/api/handlers.rs:284]
-- [ ] [Review][Patch] #9 `generate_schema` doc comment claims transaction but uses pool-direct execution [src/storage/schema.rs:352-354]
-- [ ] [Review][Patch] #10 Double-lookup in `get_idl` (contains_key + index) with stale P10 TODO [src/idl/mod.rs:77-79]
-- [ ] [Review][Patch] #11 `upload_idl` overwrites cache on duplicate re-registration — cache/DB inconsistency [src/idl/mod.rs:153, src/registry.rs:90]
-- [ ] [Review][Patch] #12 `unwrap_or_default()` in `seed_metadata` produces invalid JSONB on failure [src/storage/schema.rs:419]
+- [x] [Review][Decision] #1 Auto-fetch path not implemented (AC2) — FIXED: added `auto_fetch_idl` boxed helper with read-lock → fetch → write-lock choreography
+- [x] [Review][Decision] #2 Response status is "schema_created" not "registered" (AC2) — FIXED: response returns hardcoded `"registered"`
+- [x] [Review][Patch] #3 `DROP SCHEMA` uses `format!` instead of `quote_ident()` — FIXED: uses `quote_ident()`
+- [x] [Review][Patch] #4 `seed_metadata` uses SQL string interpolation — FIXED: parameterized INSERT with `query().bind()`
+- [x] [Review][Patch] #5 No `program_id` validation — FIXED: `validate_program_id()` using `solana_pubkey::Pubkey::parse`
+- [x] [Review][Patch] #6 Hard delete not transactional — FIXED: `hard_delete()` boxed helper, DDL on pool + DML in transaction
+- [x] [Review][Patch] #8 Soft delete missing `updated_at = NOW()` — FIXED
+- [x] [Review][Patch] #9 `generate_schema` doc comment claims transaction — FIXED: doc clarified
+- [x] [Review][Patch] #10 Double-lookup in `get_idl` — FIXED: removed stale P10 comment, added NLL explanation
+- [x] [Review][Patch] #11 `upload_idl` overwrites cache on duplicate — FIXED: `was_cached` guard in `prepare_registration`
+- [x] [Review][Patch] #12 `unwrap_or_default()` in `seed_metadata` — FIXED: propagates error via `map_err`
 - [x] [Review][Defer] #7 TOCTOU race in `write_registration` duplicate check — SELECT EXISTS + INSERT without FOR UPDATE [src/registry.rs:267-277] — deferred, requires SERIALIZABLE isolation or INSERT ON CONFLICT rewrite
 - [x] [Review][Defer] #13 `list_programs` has no pagination [src/api/handlers.rs:157] — deferred, story 5.2+ will add pagination with query builder
 - [x] [Review][Defer] #14 Excessive cloning in `commit_registration` — `Idl` cloned 2x unnecessarily [src/registry.rs:133-158] — deferred, performance optimization

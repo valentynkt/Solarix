@@ -73,7 +73,8 @@ impl IdlManager {
     /// `&mut self` across `.await` points — this ensures the returned future is
     /// `Send` when called through `Arc<RwLock<ProgramRegistry>>`.
     pub async fn get_idl(&mut self, program_id: &str) -> Result<&Idl, IdlError> {
-        // P10: Use single lookup instead of contains_key + get
+        // contains_key + index: a single `if let` borrow would conflict with
+        // the mutable `self.cache.insert()` below (NLL limitation).
         if self.cache.contains_key(program_id) {
             debug!(program_id, "IDL cache hit");
             return Ok(&self.cache[program_id].idl);

@@ -86,6 +86,15 @@ these as known technical debt; stories still in-progress have blocking items not
 - **No request body size limit on IDL upload** — `src/api/mod.rs` router has no `DefaultBodyLimit`. A large POST body could exhaust server memory. Add body limit in hardening sprint (Epic 6).
 - **Hard delete doesn't check for active indexing pipeline** — `src/api/handlers.rs:241`. No status guard before DROP SCHEMA. Pipeline (story 3.5) doesn't exist yet; add guard when pipeline is implemented.
 
+## Deferred from: code review of 2-2 round 2 (2026-04-06)
+
+- **`delete_program` hard-delete is not transactional** — `src/api/handlers.rs:251-267`. DROP SCHEMA, DELETE indexer_state, DELETE programs are three separate statements. Crash after DROP but before DELETEs leaves orphaned rows. Wrap in transaction. **Story 5-1 scope.**
+- **`register_program` returns HTTP 202 but operation is synchronous** — `src/api/handlers.rs:111-124`. Should return 201 Created since everything completes before response. **Story 5-1 scope.**
+- **`tokio::spawn` in register_program handler loses tracing context** — `src/api/handlers.rs:77-80`. New task does not inherit the current tracing span. **Story 5-1 / 6-1 scope.**
+- **`get_program` handler panics on NULL `idl_hash`/`idl_source` columns** — `src/api/handlers.rs:210-211`. `row.get::<String>()` panics if column is NULL. Columns are nullable in schema. Use `Option<String>`. **Story 5-1 scope.**
+- **`register_program` with null IDL and no prior cache doesn't trigger on-chain fetch** — Handler goes directly to `prepare_registration` without calling `fetch_idl_standalone`. Returns opaque "IDL not found" error. **Story 5-1 handler logic.**
+- **Status stuck at `registered` after partial `commit_registration` failure** — If `generate_schema` succeeds but `update_program_status` fails, program row stays at `registered` status forever. No reconciliation mechanism. Future hardening.
+
 ## Deferred from: code review of 3-3-rpc-block-source-and-rate-limited-fetching (2026-04-06, second pass)
 
 - **Unbounded `Vec` accumulation in `get_blocks` for huge ranges** — `src/pipeline/rpc.rs:347`. Calling `get_blocks(0, 300_000_000)` accumulates ~150M u64 entries (~1.2 GB). Pipeline orchestrator will enforce `backfill_chunk_size` when implemented (Story 3-5). Add a max-range guard or streaming mechanism.

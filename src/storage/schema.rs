@@ -351,7 +351,8 @@ pub fn build_ddl_statements(idl: &Idl, schema_name: &str) -> Vec<String> {
 
 /// Generate the full PostgreSQL schema for a program from its IDL.
 ///
-/// Executes all DDL in a transaction. On failure, all changes are rolled back.
+/// All DDL uses `IF NOT EXISTS`, making each statement idempotent.
+/// Executed directly on the pool (no explicit transaction).
 ///
 /// All parameters are owned so the returned future is `'static` + `Send`.
 /// Borrowed parameters create futures with specific lifetimes that Rust's async
@@ -391,6 +392,7 @@ pub fn generate_schema(
 /// Seed the `_metadata` table with program information.
 ///
 /// Uses INSERT ... ON CONFLICT DO UPDATE for idempotency.
+/// Each entry is inserted via a parameterized query to avoid SQL interpolation.
 pub fn seed_metadata(
     pool: PgPool,
     idl: Idl,
@@ -413,27 +415,39 @@ pub fn seed_metadata(
         ];
 
         let qualified = format!("{}.{}", quote_ident(&schema_name), quote_ident("_metadata"));
-
-        let mut batch = String::new();
-        for (key, value) in &metadata_entries {
-            let json_str = serde_json::to_string(value).unwrap_or_default();
-            let escaped = json_str.replace('\'', "''");
-            let _ = write!(
-                batch,
-                r#"INSERT INTO {qualified} ("key", "value") VALUES ('{key}', '{escaped}'::jsonb)
-                   ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value";
-"#
-            );
-        }
-        let _ = write!(
-            batch,
-            r#"INSERT INTO {qualified} ("key", "value") VALUES ('schema_created_at', to_jsonb(NOW()::text))
-               ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value";"#
+        let upsert_sql = format!(
+            r#"INSERT INTO {qualified} ("key", "value") VALUES ($1, $2::jsonb)
+               ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value""#
         );
 
-        sqlx::raw_sql(&batch).execute(&pool).await.map_err(|e| {
-            StorageError::DdlFailed(format!("metadata seed failed for {schema_name}: {e}"))
-        })?;
+        for (key, value) in &metadata_entries {
+            let json_str = serde_json::to_string(value).map_err(|e| {
+                StorageError::DdlFailed(format!(
+                    "metadata serialization failed for key '{key}': {e}"
+                ))
+            })?;
+            sqlx::query(&upsert_sql)
+                .bind(key)
+                .bind(&json_str)
+                .execute(&pool)
+                .await
+                .map_err(|e| {
+                    StorageError::DdlFailed(format!("metadata seed failed for {schema_name}: {e}"))
+                })?;
+        }
+
+        // schema_created_at with server-side NOW()
+        let ts_sql = format!(
+            r#"INSERT INTO {qualified} ("key", "value") VALUES ($1, to_jsonb(NOW()::text))
+               ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value""#
+        );
+        sqlx::query(&ts_sql)
+            .bind("schema_created_at")
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                StorageError::DdlFailed(format!("metadata seed failed for {schema_name}: {e}"))
+            })?;
 
         info!(%schema_name, "metadata seeded");
 

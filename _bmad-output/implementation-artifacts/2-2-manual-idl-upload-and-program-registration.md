@@ -148,6 +148,36 @@ so that I can index programs that don't have on-chain IDLs or use custom IDL mod
 
 - [x] [Review][Defer] `indexer_state.last_processed_slot` defaults to NULL — verified safe; column is nullable, pipeline checkpoint reads handle NULL as "no progress"
 
+### Review Findings (Round 2)
+
+**Review ran 2026-04-06 using 3-layer adversarial review (Blind Hunter, Edge Case Hunter, Acceptance Auditor). Fresh re-review of current state after !Send blocker resolved.**
+
+**Patch findings:**
+
+- [ ] [Review][Patch] SQL injection in `seed_metadata` — string interpolation of IDL-derived values instead of parameterized queries [src/storage/schema.rs:418-426]
+- [ ] [Review][Patch] Cache rollback doesn't preserve pre-existing IDL on failed re-registration — manual upload overwrites cache, rollback skipped when was_cached=true [src/registry.rs:87-98]
+- [ ] [Review][Patch] TOCTOU race in `write_registration` — concurrent registrations both pass SELECT EXISTS, second gets 500 instead of 409 AlreadyRegistered [src/registry.rs:267-290]
+- [ ] [Review][Patch] `get_idl` double hash lookup — stale P10 comment, still uses contains_key + `[]` indexing [src/idl/mod.rs:77-79]
+- [ ] [Review][Patch] `compute_idl_hash` silent fallback on canonicalization failure — no warn! log [src/idl/mod.rs:287-293]
+- [ ] [Review][Patch] `panic!()` in integration test caught by `clippy::panic = "deny"` lint [tests/registration_test.rs:141]
+- [ ] [Review][Patch] `decompress_idl_data` — `HEADER_SIZE + data_len` can overflow usize on 32-bit targets, use checked_add [src/idl/fetch.rs:150-152]
+- [ ] [Review][Patch] Integration test cleanup doesn't DROP generated schema — leaves stale schemas in DB [tests/registration_test.rs:38-48]
+
+**Deferred findings (pre-existing or out-of-scope):**
+
+- [x] [Review][Defer] SQL injection in `delete_program` — `format!()` without `quote_ident()` in DROP SCHEMA — story 5-1 scope
+- [x] [Review][Defer] `delete_program` hard-delete is not transactional (DROP SCHEMA + DELETEs are separate) — story 5-1 scope
+- [x] [Review][Defer] No `program_id` format validation at API entry — already tracked in deferred-work.md
+- [x] [Review][Defer] `register_program` returns 202 but operation is synchronous (should be 201) — story 5-1 scope
+- [x] [Review][Defer] `tokio::spawn` in handler loses tracing context — story 5-1/6-1 scope
+- [x] [Review][Defer] `get_program` handler panics on NULL `idl_hash`/`idl_source` columns — story 5-1 scope
+- [x] [Review][Defer] `get_idl()` duplicated fetch cascade logic with `fetch_idl_standalone()` — refactoring opportunity
+- [x] [Review][Defer] `register_program` with null IDL and no cache doesn't trigger on-chain fetch — story 5-1 handler logic
+- [x] [Review][Defer] Schema name collision for very long IDL names (>54 chars after truncation) — architecture decision, PG limit
+- [x] [Review][Defer] Status stuck at `registered` after partial commit_registration failure — needs reconciliation mechanism
+
+**Dismissed (12 findings):** duplicates, false positives, or handled by design (serde_json recursion limits, Rust path safety, intentional !Send architectural deviations, AC4 spec match).
+
 ## Dev Notes
 
 ### Current Codebase State (Post Story 2.1)

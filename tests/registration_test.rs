@@ -51,7 +51,8 @@ async fn cleanup(pool: &sqlx::PgPool, program_id: &str) {
 #[ignore] // requires running PostgreSQL
 async fn register_program_creates_db_rows() {
     let pool = setup_pool().await;
-    let program_id = "TestProgramRegistration111111111111111111111";
+    // Valid base58 Solana pubkey for test isolation
+    let program_id = "Testa1111111111111111111111111111111111111111";
 
     cleanup(&pool, program_id).await;
 
@@ -72,7 +73,7 @@ async fn register_program_creates_db_rows() {
     assert_eq!(info.idl_source, "manual");
     assert_eq!(info.status, "schema_created");
     assert!(!info.idl_hash.is_empty());
-    assert_eq!(info.schema_name, "test_program_testprog");
+    assert_eq!(info.schema_name, "test_program_testa111");
 
     // Verify programs row
     let row = sqlx::query(r#"SELECT "program_name", "schema_name", "status", "idl_source" FROM "programs" WHERE "program_id" = $1"#)
@@ -109,7 +110,8 @@ async fn register_program_creates_db_rows() {
 #[ignore] // requires running PostgreSQL
 async fn register_duplicate_program_returns_error() {
     let pool = setup_pool().await;
-    let program_id = "TestDuplicateProgram1111111111111111111111111";
+    // Valid base58 Solana pubkey for test isolation
+    let program_id = "Testb1111111111111111111111111111111111111111";
 
     cleanup(&pool, program_id).await;
 

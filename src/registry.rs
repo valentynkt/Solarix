@@ -86,9 +86,12 @@ impl ProgramRegistry {
     ) -> Result<RegistrationData, RegistrationError> {
         let was_cached = self.idl_manager.get_cached(&program_id).is_some();
 
-        // Manual upload: parse + cache (sync)
+        // Manual upload: parse + cache (sync). Skip if already cached —
+        // the DB duplicate check in commit_registration handles re-registration.
         if let Some(ref json) = idl_json {
-            self.idl_manager.upload_idl(&program_id, json)?;
+            if !was_cached {
+                self.idl_manager.upload_idl(&program_id, json)?;
+            }
         } else if !was_cached {
             // Caller must pre-fetch the IDL before acquiring the write lock.
             // This should not happen if the handler logic is correct.

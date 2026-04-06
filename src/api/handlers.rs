@@ -13,7 +13,9 @@ use sqlx::Row;
 use tokio::time::timeout;
 use tracing::info;
 
+use crate::idl::IdlManager;
 use crate::registry::ProgramRegistry;
+use crate::storage::schema::quote_ident;
 
 use super::{ApiError, AppState};
 
@@ -31,6 +33,17 @@ pub struct RegisterProgramRequest {
 pub struct DeleteProgramQuery {
     #[serde(default)]
     pub drop_tables: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+fn validate_program_id(program_id: &str) -> Result<(), ApiError> {
+    program_id
+        .parse::<solana_pubkey::Pubkey>()
+        .map_err(|_| ApiError::InvalidRequest(format!("invalid program_id: '{program_id}'")))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -84,11 +97,18 @@ async fn do_register(
     pool: sqlx::PgPool,
     body: RegisterProgramRequest,
 ) -> Result<Response, ApiError> {
+    validate_program_id(&body.program_id)?;
+
     let idl_json = body
         .idl
         .map(|v| serde_json::to_string(&v))
         .transpose()
         .map_err(|e| ApiError::InvalidRequest(format!("invalid IDL JSON: {e}")))?;
+
+    // Auto-fetch: if no IDL provided, fetch via on-chain -> bundled cascade
+    if idl_json.is_none() {
+        auto_fetch_idl(Arc::clone(&registry), body.program_id.clone()).await?;
+    }
 
     let data = prepare_registration(Arc::clone(&registry), body.program_id, idl_json).await?;
 
@@ -113,7 +133,7 @@ async fn do_register(
         Json(json!({
             "data": {
                 "program_id": program_info.program_id,
-                "status": program_info.status,
+                "status": "registered",
                 "idl_source": program_info.idl_source,
             },
             "meta": {
@@ -153,6 +173,43 @@ fn rollback_cache(
     })
 }
 
+/// Fetch IDL via cascade (on-chain -> bundled) for auto-fetch registration.
+///
+/// Acquires read lock to check cache and get fetch params, drops it,
+/// performs async fetch (no lock held), acquires write lock to cache
+/// the result, drops it.
+fn auto_fetch_idl(
+    registry: Arc<tokio::sync::RwLock<ProgramRegistry>>,
+    program_id: String,
+) -> Pin<Box<dyn Future<Output = Result<(), ApiError>> + Send>> {
+    Box::pin(async move {
+        // Check cache + get fetch params under one read lock
+        let params = {
+            let guard = registry.read().await;
+            if guard.idl_manager.get_cached(&program_id).is_some() {
+                return Ok(());
+            }
+            guard.idl_manager.fetch_params()
+        };
+
+        // Fetch IDL (async, no lock held — Send-safe)
+        let (idl_json, source) = IdlManager::fetch_idl_standalone(&params, &program_id)
+            .await
+            .map_err(|e| ApiError::IdlError(e.to_string()))?;
+
+        // Cache under write lock
+        {
+            let mut guard = registry.write().await;
+            guard
+                .idl_manager
+                .insert_fetched_idl(&program_id, &idl_json, source)
+                .map_err(|e| ApiError::IdlError(e.to_string()))?;
+        }
+
+        Ok(())
+    })
+}
+
 pub async fn list_programs(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let rows = sqlx::query(
         r#"SELECT "program_id", "program_name", "status", "created_at"
@@ -189,6 +246,8 @@ pub async fn get_program(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
     let row = sqlx::query(
         r#"SELECT p."program_id", p."program_name", p."schema_name",
                 p."idl_source", p."idl_hash", p."status",
@@ -238,6 +297,8 @@ pub async fn delete_program(
     Path(id): Path<String>,
     Query(query): Query<DeleteProgramQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_program_id(&id)?;
+
     if query.drop_tables {
         // Hard delete: drop schema, remove from DB and cache
         let schema_name: String =
@@ -248,23 +309,7 @@ pub async fn delete_program(
                 .map_err(|e| ApiError::QueryFailed(e.to_string()))?
                 .ok_or_else(|| ApiError::ProgramNotFound(id.clone()))?;
 
-        let drop_ddl = format!(r#"DROP SCHEMA IF EXISTS "{schema_name}" CASCADE"#);
-        sqlx::raw_sql(&drop_ddl)
-            .execute(&state.pool)
-            .await
-            .map_err(|e| ApiError::StorageError(e.to_string()))?;
-
-        sqlx::query(r#"DELETE FROM "indexer_state" WHERE "program_id" = $1"#)
-            .bind(&id)
-            .execute(&state.pool)
-            .await
-            .map_err(|e| ApiError::StorageError(e.to_string()))?;
-
-        sqlx::query(r#"DELETE FROM "programs" WHERE "program_id" = $1"#)
-            .bind(&id)
-            .execute(&state.pool)
-            .await
-            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+        hard_delete(state.pool.clone(), schema_name, id.clone()).await?;
 
         let mut registry = state.registry.write().await;
         registry.remove_program(&id);
@@ -280,12 +325,14 @@ pub async fn delete_program(
         })))
     } else {
         // Soft delete: set status to stopped
-        let result =
-            sqlx::query(r#"UPDATE "programs" SET "status" = 'stopped' WHERE "program_id" = $1"#)
-                .bind(&id)
-                .execute(&state.pool)
-                .await
-                .map_err(|e| ApiError::StorageError(e.to_string()))?;
+        let result = sqlx::query(
+            r#"UPDATE "programs" SET "status" = 'stopped', "updated_at" = NOW()
+               WHERE "program_id" = $1"#,
+        )
+        .bind(&id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| ApiError::StorageError(e.to_string()))?;
 
         if result.rows_affected() == 0 {
             return Err(ApiError::ProgramNotFound(id));
@@ -301,6 +348,50 @@ pub async fn delete_program(
             }
         })))
     }
+}
+
+/// Execute hard delete: DROP SCHEMA + DELETE rows in a transactional DML block.
+///
+/// DDL runs on pool directly (raw_sql + tx.as_mut() triggers !Send).
+/// DML (DELETEs) runs in an explicit transaction for atomicity.
+fn hard_delete(
+    pool: sqlx::PgPool,
+    schema_name: String,
+    program_id: String,
+) -> Pin<Box<dyn Future<Output = Result<(), ApiError>> + Send>> {
+    Box::pin(async move {
+        let drop_ddl = format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            quote_ident(&schema_name)
+        );
+        sqlx::raw_sql(&drop_ddl)
+            .execute(&pool)
+            .await
+            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        sqlx::query(r#"DELETE FROM "indexer_state" WHERE "program_id" = $1"#)
+            .bind(&program_id)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        sqlx::query(r#"DELETE FROM "programs" WHERE "program_id" = $1"#)
+            .bind(&program_id)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| ApiError::StorageError(e.to_string()))?;
+
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -410,5 +501,31 @@ mod tests {
         let json = r#"{"drop_tables": true}"#;
         let q: DeleteProgramQuery = serde_json::from_str(json).unwrap();
         assert!(q.drop_tables);
+    }
+
+    #[test]
+    fn validate_program_id_accepts_valid_pubkey() {
+        // System program
+        assert!(validate_program_id("11111111111111111111111111111111").is_ok());
+        // Token program
+        assert!(validate_program_id("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").is_ok());
+    }
+
+    #[test]
+    fn validate_program_id_rejects_empty() {
+        assert!(validate_program_id("").is_err());
+    }
+
+    #[test]
+    fn validate_program_id_rejects_non_base58() {
+        // 'l' (lowercase L) and '0' (zero) are not in base58 alphabet
+        assert!(validate_program_id("0000000000000000000000000000000000000000000").is_err());
+        assert!(validate_program_id("llllllllllllllllllllllllllllllll").is_err());
+    }
+
+    #[test]
+    fn validate_program_id_rejects_wrong_length() {
+        // Too short — valid base58 but not 32 bytes
+        assert!(validate_program_id("abc").is_err());
     }
 }
