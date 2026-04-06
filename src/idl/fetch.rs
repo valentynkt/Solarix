@@ -149,7 +149,9 @@ pub fn decompress_idl_data(account_data: &[u8]) -> Result<String, IdlError> {
         .map_err(|_| IdlError::DecompressionFailed("failed to read data_len".to_string()))?;
     let data_len = u32::from_le_bytes(data_len_bytes) as usize;
 
-    let payload_end = HEADER_SIZE + data_len;
+    let payload_end = HEADER_SIZE
+        .checked_add(data_len)
+        .ok_or_else(|| IdlError::DecompressionFailed(format!("data_len overflow: {data_len}")))?;
     if account_data.len() < payload_end {
         return Err(IdlError::DecompressionFailed(format!(
             "account data truncated: have {} bytes, need {payload_end} (data_len={data_len})",

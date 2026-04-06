@@ -3,6 +3,7 @@ use sqlx::Row;
 
 use solarix::idl::IdlManager;
 use solarix::registry::{ProgramRegistry, RegistrationError};
+use solarix::storage::schema::derive_schema_name;
 
 fn sample_idl_json() -> String {
     serde_json::json!({
@@ -36,6 +37,14 @@ async fn setup_pool() -> sqlx::PgPool {
 }
 
 async fn cleanup(pool: &sqlx::PgPool, program_id: &str) {
+    // Drop generated schema (ignore errors if it doesn't exist)
+    let schema_name = derive_schema_name("test_program", program_id);
+    let drop_ddl = format!(
+        "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
+        schema_name.replace('"', "\"\"")
+    );
+    let _ = sqlx::raw_sql(&drop_ddl).execute(pool).await;
+
     // Clean up test data (ignore errors if rows don't exist)
     let _ = sqlx::query(r#"DELETE FROM "indexer_state" WHERE "program_id" = $1"#)
         .bind(program_id)
@@ -135,14 +144,10 @@ async fn register_duplicate_program_returns_error() {
         .await
         .expect_err("second commit should fail with AlreadyRegistered");
 
-    match err {
-        RegistrationError::AlreadyRegistered(id) => {
-            assert_eq!(id, program_id);
-        }
-        other => {
-            panic!("expected AlreadyRegistered, got: {other}");
-        }
-    }
+    assert!(
+        matches!(&err, RegistrationError::AlreadyRegistered(id) if id == program_id),
+        "expected AlreadyRegistered({program_id}), got: {err}"
+    );
 
     cleanup(&pool, program_id).await;
 }

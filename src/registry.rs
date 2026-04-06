@@ -290,7 +290,15 @@ impl ProgramRegistry {
             .bind(&idl_source)
             .execute(tx.as_mut())
             .await
-            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+            .map_err(|e| {
+                // Catch PG unique violation (23505) from concurrent registration race
+                if let sqlx::Error::Database(ref db_err) = e {
+                    if db_err.code().as_deref() == Some("23505") {
+                        return RegistrationError::AlreadyRegistered(program_id.clone());
+                    }
+                }
+                RegistrationError::DatabaseError(e.to_string())
+            })?;
 
             sqlx::query(
                 r#"INSERT INTO "indexer_state" ("program_id", "status", "total_instructions", "total_accounts")

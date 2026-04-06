@@ -288,9 +288,15 @@ pub fn compute_idl_hash(idl_json: &str) -> String {
     let normalized = match serde_json::from_str::<serde_json::Value>(idl_json) {
         Ok(value) => {
             let canonical = canonicalize_json(value);
-            serde_json::to_string(&canonical).unwrap_or_else(|_| idl_json.to_string())
+            serde_json::to_string(&canonical).unwrap_or_else(|e| {
+                warn!("IDL hash canonicalization failed, using raw input: {e}");
+                idl_json.to_string()
+            })
         }
-        Err(_) => idl_json.to_string(),
+        Err(e) => {
+            warn!("IDL hash JSON parse failed, using raw input: {e}");
+            idl_json.to_string()
+        }
     };
 
     let mut hasher = Sha256::new();

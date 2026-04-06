@@ -1,6 +1,6 @@
 # Story 2.2: Manual IDL Upload & Program Registration
 
-Status: review
+Status: done
 
 ## Story
 
@@ -134,17 +134,9 @@ so that I can index programs that don't have on-chain IDLs or use custom IDL mod
 
 **Dismissed (5 findings):** false positives or handled by design.
 
-### Review Status: BLOCKED
+### Review Status: COMPLETE
 
-**All patches are applied in code but build cannot be verified** due to a pre-existing compilation error in `src/api/handlers.rs` (axum `Handler` trait not satisfied for `register_program`). This is from story 5-1 API handler work happening in parallel on the same branch.
-
-**To resume:**
-
-1. Fix the axum handler compilation issue in `src/api/handlers.rs` (the `do_register_program` refactor is on the right track — needs the `Send` future issue resolved)
-2. Run `cargo build` to verify all patches compile
-3. Run `cargo test --lib` to verify unit tests (schema, IDL, registry modules)
-4. Run `cargo clippy` and `cargo fmt -- --check`
-5. If all pass, mark this story as `done`
+**Round 1 blocker resolved** by story 5-1 (!Send fix). Round 2 review ran fresh, found 8 patches (3 already fixed by 5-1 review, 1 dismissed as NLL limitation, 4 applied). All verified: build, clippy, 113 tests pass, fmt clean.
 
 - [x] [Review][Defer] `indexer_state.last_processed_slot` defaults to NULL — verified safe; column is nullable, pipeline checkpoint reads handle NULL as "no progress"
 
@@ -154,14 +146,14 @@ so that I can index programs that don't have on-chain IDLs or use custom IDL mod
 
 **Patch findings:**
 
-- [ ] [Review][Patch] SQL injection in `seed_metadata` — string interpolation of IDL-derived values instead of parameterized queries [src/storage/schema.rs:418-426]
-- [ ] [Review][Patch] Cache rollback doesn't preserve pre-existing IDL on failed re-registration — manual upload overwrites cache, rollback skipped when was_cached=true [src/registry.rs:87-98]
-- [ ] [Review][Patch] TOCTOU race in `write_registration` — concurrent registrations both pass SELECT EXISTS, second gets 500 instead of 409 AlreadyRegistered [src/registry.rs:267-290]
-- [ ] [Review][Patch] `get_idl` double hash lookup — stale P10 comment, still uses contains_key + `[]` indexing [src/idl/mod.rs:77-79]
-- [ ] [Review][Patch] `compute_idl_hash` silent fallback on canonicalization failure — no warn! log [src/idl/mod.rs:287-293]
-- [ ] [Review][Patch] `panic!()` in integration test caught by `clippy::panic = "deny"` lint [tests/registration_test.rs:141]
-- [ ] [Review][Patch] `decompress_idl_data` — `HEADER_SIZE + data_len` can overflow usize on 32-bit targets, use checked_add [src/idl/fetch.rs:150-152]
-- [ ] [Review][Patch] Integration test cleanup doesn't DROP generated schema — leaves stale schemas in DB [tests/registration_test.rs:38-48]
+- [x] [Review][Patch] SQL injection in `seed_metadata` — **FIXED in commit 1728916**: now uses parameterized $1, $2 queries [src/storage/schema.rs]
+- [x] [Review][Patch] Cache rollback doesn't preserve pre-existing IDL — **FIXED in commit 1728916**: skip upload_idl when was_cached=true [src/registry.rs]
+- [x] [Review][Patch] TOCTOU race in `write_registration` — **APPLIED**: catch PG unique violation 23505, map to AlreadyRegistered [src/registry.rs:291-296]
+- [x] [Review][Patch] `get_idl` double hash lookup — **DISMISSED**: NLL borrow limitation prevents if-let pattern, comment corrected in commit 1728916 [src/idl/mod.rs:76-77]
+- [x] [Review][Patch] `compute_idl_hash` silent fallback — **APPLIED**: added warn! log on canonicalization failure [src/idl/mod.rs:291-296]
+- [x] [Review][Patch] `panic!()` in integration test — **APPLIED**: replaced with assert!(matches!(...)) pattern [tests/registration_test.rs:138-141]
+- [x] [Review][Patch] `decompress_idl_data` overflow — **APPLIED**: use checked_add for payload_end [src/idl/fetch.rs:152-154]
+- [x] [Review][Patch] Integration test cleanup — **APPLIED**: added DROP SCHEMA IF EXISTS CASCADE to cleanup function [tests/registration_test.rs:40-46]
 
 **Deferred findings (pre-existing or out-of-scope):**
 
