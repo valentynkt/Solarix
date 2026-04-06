@@ -1209,6 +1209,8 @@ mod tests {
             ws_ping_interval_secs: 30,
             ws_pong_timeout_secs: 10,
             dedup_cache_size: 10_000,
+            shutdown_drain_secs: 15,
+            shutdown_db_flush_secs: 10,
             log_level: String::new(),
             log_format: String::new(),
         }
