@@ -247,6 +247,7 @@ mod tests {
             ResolvedFilter {
                 column_expr: ColumnExpr::Promoted {
                     column: "slot".to_string(),
+                    pg_type: Some("BIGINT".to_string()),
                 },
                 op: FilterOp::Gte,
                 value: "100".to_string(),
@@ -254,6 +255,7 @@ mod tests {
             ResolvedFilter {
                 column_expr: ColumnExpr::Promoted {
                     column: "instruction_name".to_string(),
+                    pg_type: Some("TEXT".to_string()),
                 },
                 op: FilterOp::Eq,
                 value: "transfer".to_string(),
@@ -357,6 +359,7 @@ mod tests {
         let filters = vec![ResolvedFilter {
             column_expr: ColumnExpr::Promoted {
                 column: "status".to_string(),
+                pg_type: Some("TEXT".to_string()),
             },
             op: FilterOp::In,
             value: "a,b,c".to_string(),
@@ -366,8 +369,8 @@ mod tests {
         let sql = qb.sql();
 
         assert!(
-            sql.contains(r#""status" = ANY("#),
-            "expected = ANY(), got: {sql}"
+            sql.contains(r#""status"::text = ANY("#),
+            "expected ::text = ANY(), got: {sql}"
         );
     }
 
@@ -423,6 +426,7 @@ mod tests {
         let filters = vec![ResolvedFilter {
             column_expr: ColumnExpr::Promoted {
                 column: "status".to_string(),
+                pg_type: Some("TEXT".to_string()),
             },
             op: FilterOp::In,
             value: "".to_string(),

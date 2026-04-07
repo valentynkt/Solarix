@@ -122,3 +122,41 @@ pub struct Config {
     #[arg(long, env = "SOLARIX_LOG_FORMAT", default_value = "json")]
     pub log_format: String,
 }
+
+#[cfg(test)]
+impl Config {
+    /// Construct a Config with test-friendly defaults. Test-only helper to
+    /// avoid every module that consumes Config duplicating field-by-field
+    /// initializers in its test module.
+    pub fn test_default() -> Self {
+        Self {
+            rpc_url: String::new(),
+            ws_url: None,
+            database_url: String::new(),
+            db_pool_min: 2,
+            db_pool_max: 10,
+            rpc_rps: 10,
+            backfill_chunk_size: 50_000,
+            start_slot: None,
+            end_slot: None,
+            index_failed_txs: false,
+            api_host: String::new(),
+            api_port: 3000,
+            api_default_page_size: 50,
+            api_max_page_size: 1000,
+            channel_capacity: 256,
+            checkpoint_interval_secs: 10,
+            retry_initial_ms: 500,
+            retry_max_ms: 30_000,
+            retry_timeout_secs: 300,
+            max_consecutive_fetch_failures: 100,
+            ws_ping_interval_secs: 30,
+            ws_pong_timeout_secs: 10,
+            dedup_cache_size: 10_000,
+            shutdown_drain_secs: 15,
+            shutdown_db_flush_secs: 10,
+            log_level: String::new(),
+            log_format: String::new(),
+        }
+    }
+}

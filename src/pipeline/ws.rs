@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::net::TcpStream;
-use tokio::time::Instant;
+use tokio::time::{timeout, Instant};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
@@ -17,10 +17,31 @@ use super::PipelineError;
 use crate::config::Config;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Total budget for `connect_async` + subscribe handshake response. Protects
+/// against stalled DNS, TLS handshake blackholes, and unresponsive servers.
+const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Hard cap on the base58 signature length we accept from a notification.
+/// Solana signatures are 88 chars; 128 leaves headroom without permitting
+/// unbounded heap growth from a buggy/malicious upstream.
+const MAX_SIGNATURE_LEN: usize = 128;
+
+/// Upper bound applied to `dedup_cache_size` capacity hints so a pathological
+/// config value cannot pre-allocate hundreds of GB at startup.
+const DEDUP_CAPACITY_HINT_CAP: usize = 1 << 20;
+
+/// Fallback deadline duration if `Instant + Duration` would overflow.
+const FALLBACK_DEADLINE: Duration = Duration::from_secs(60);
+
+// ---------------------------------------------------------------------------
 // StreamEvent
 // ---------------------------------------------------------------------------
 
 /// Event received from WebSocket transaction stream.
+#[derive(Debug)]
 pub struct StreamEvent {
     pub signature: String,
     pub slot: u64,
@@ -40,9 +61,10 @@ pub struct DeduplicationSet {
 
 impl DeduplicationSet {
     pub fn new(max_size: usize) -> Self {
+        let hint = max_size.min(DEDUP_CAPACITY_HINT_CAP);
         Self {
-            seen: HashSet::with_capacity(max_size),
-            order: VecDeque::with_capacity(max_size),
+            seen: HashSet::with_capacity(hint),
+            order: VecDeque::with_capacity(hint),
             max_size,
         }
     }
@@ -80,8 +102,12 @@ impl DeduplicationSet {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct WsJsonRpcResponse {
+struct WsJsonRpcEnvelope {
+    /// Present on server-push notifications (e.g. "logsNotification").
+    method: Option<String>,
+    /// Present on JSON-RPC responses to client requests.
     result: Option<serde_json::Value>,
+    /// Present on JSON-RPC errors (either responses or server-initiated).
     error: Option<WsJsonRpcError>,
 }
 
@@ -160,6 +186,10 @@ pub struct WsTransactionStream {
     last_message_time: Instant,
     pending_ping: bool,
     last_ping_time: Instant,
+    /// Raw text frames received during `subscribe()` before the subscribe
+    /// response arrived. Drained by `next()` so handshake-ordering races
+    /// never drop data.
+    pending_frames: VecDeque<String>,
 }
 
 impl WsTransactionStream {
@@ -182,15 +212,39 @@ impl WsTransactionStream {
             last_message_time: now,
             pending_ping: false,
             last_ping_time: now,
+            pending_frames: VecDeque::new(),
         }
     }
-}
 
-#[async_trait]
-impl TransactionStream for WsTransactionStream {
-    async fn subscribe(&mut self, program_id: &str) -> Result<(), PipelineError> {
-        info!(ws_url = %self.ws_url, program_id, "connecting to WebSocket");
+    /// Reset all heartbeat / session state. Called at the start of `subscribe()`
+    /// to guarantee a resubscribe on the same instance begins with a clean slate.
+    fn reset_session_state(&mut self) {
+        let now = Instant::now();
+        self.last_message_time = now;
+        self.last_ping_time = now;
+        self.pending_ping = false;
+        self.pending_frames.clear();
+    }
 
+    /// Compute the next deadline for `tokio::time::sleep_until`, guarding
+    /// against `Instant + Duration` overflow (project forbids panics).
+    fn next_deadline(&self) -> Instant {
+        let (base, delta) = if self.pending_ping {
+            (self.last_ping_time, self.pong_timeout)
+        } else {
+            (self.last_message_time, self.ping_interval)
+        };
+        base.checked_add(delta)
+            .unwrap_or_else(|| Instant::now() + FALLBACK_DEADLINE)
+    }
+
+    /// Connect, send `logsSubscribe`, and block until the subscribe response
+    /// arrives. Any `logsNotification` frames that race the response are
+    /// buffered into `self.pending_frames` so `next()` can replay them.
+    /// Split out from `subscribe()` so a single `timeout()` can cover the
+    /// whole handshake without needing `async move` (which would consume
+    /// `&mut self` for the duration of the await).
+    async fn do_handshake(&mut self, program_id: String) -> Result<(), PipelineError> {
         let (ws_stream, _response) = connect_async(&self.ws_url)
             .await
             .map_err(|e| PipelineError::WebSocketDisconnect(format!("connect failed: {e}")))?;
@@ -218,38 +272,58 @@ impl TransactionStream for WsTransactionStream {
                 PipelineError::WebSocketDisconnect(format!("subscribe send failed: {e}"))
             })?;
 
-        // Read subscription response
+        // Read subscription response. logsNotification frames that arrive
+        // before the response are buffered into `self.pending_frames` so
+        // `next()` can replay them.
         loop {
             match ws.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    let response: WsJsonRpcResponse = serde_json::from_str(&text).map_err(|e| {
+                    let envelope: WsJsonRpcEnvelope = serde_json::from_str(&text).map_err(|e| {
                         PipelineError::WebSocketDisconnect(format!(
                             "failed to parse subscribe response: {e}"
                         ))
                     })?;
 
-                    if let Some(error) = response.error {
+                    // A server-push notification raced the subscribe ack —
+                    // buffer it so `next()` can replay it.
+                    if envelope.method.as_deref() == Some("logsNotification") {
+                        self.pending_frames.push_back(text.to_string());
+                        continue;
+                    }
+
+                    if let Some(error) = envelope.error {
                         return Err(PipelineError::WebSocketDisconnect(format!(
                             "logsSubscribe failed: {} (code {})",
                             error.message, error.code
                         )));
                     }
 
-                    if let Some(result) = response.result {
-                        self.subscription_id = Some(result.as_u64().ok_or_else(|| {
+                    if let Some(result) = envelope.result {
+                        let sub_id = result.as_u64().ok_or_else(|| {
                             PipelineError::WebSocketDisconnect(format!(
                                 "logsSubscribe returned non-u64 subscription ID: {result}"
                             ))
-                        })?);
-                        break;
+                        })?;
+                        self.subscription_id = Some(sub_id);
+                        return Ok(());
                     }
+                    // No method, no result, no error — ignore and keep
+                    // reading. The timeout wrapper protects us from a
+                    // misbehaving server that spams these forever.
                 }
                 Some(Ok(Message::Ping(data))) => {
                     ws.send(Message::Pong(data)).await.map_err(|e| {
                         PipelineError::WebSocketDisconnect(format!("pong send failed: {e}"))
                     })?;
                 }
-                Some(Ok(_)) => continue,
+                Some(Ok(Message::Close(_))) => {
+                    return Err(PipelineError::WebSocketDisconnect(
+                        "server closed connection during subscribe".into(),
+                    ));
+                }
+                Some(Ok(other)) => {
+                    debug!(?other, "ignoring unexpected WS frame during subscribe");
+                }
                 Some(Err(e)) => {
                     return Err(PipelineError::WebSocketDisconnect(format!(
                         "error during subscribe: {e}"
@@ -262,6 +336,32 @@ impl TransactionStream for WsTransactionStream {
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl TransactionStream for WsTransactionStream {
+    async fn subscribe(&mut self, program_id: &str) -> Result<(), PipelineError> {
+        // Clean up any previous session so a resubscribe on the same instance
+        // does not leak the prior server-side subscription or carry over stale
+        // heartbeat state. `unsubscribe()` is idempotent on an empty session.
+        let _ = self.unsubscribe().await;
+        self.reset_session_state();
+
+        info!(ws_url = %self.ws_url, program_id, "connecting to WebSocket");
+
+        // Whole handshake (connect + subscribe + read response) shares a
+        // single budget. Protects against stalled DNS, TLS handshake
+        // blackholes, and servers that accept the connection but never reply.
+        let program_id_owned = program_id.to_string();
+        timeout(WS_HANDSHAKE_TIMEOUT, self.do_handshake(program_id_owned))
+            .await
+            .map_err(|_| {
+                PipelineError::WebSocketDisconnect(format!(
+                    "WebSocket handshake timed out after {}s",
+                    WS_HANDSHAKE_TIMEOUT.as_secs()
+                ))
+            })??;
 
         self.last_message_time = Instant::now();
 
@@ -275,11 +375,15 @@ impl TransactionStream for WsTransactionStream {
 
     async fn next(&mut self) -> Result<Option<StreamEvent>, PipelineError> {
         loop {
-            let deadline = if self.pending_ping {
-                self.last_ping_time + self.pong_timeout
-            } else {
-                self.last_message_time + self.ping_interval
-            };
+            // Replay any frames buffered during `subscribe()` first.
+            if let Some(text) = self.pending_frames.pop_front() {
+                match parse_logs_notification(&text, &mut self.dedup, &mut self.last_seen_slot)? {
+                    Some(event) => return Ok(Some(event)),
+                    None => continue,
+                }
+            }
+
+            let deadline = self.next_deadline();
 
             // Scope the ws borrow so it's released before processing
             let received = {
@@ -299,41 +403,43 @@ impl TransactionStream for WsTransactionStream {
             };
 
             match received {
-                Received::Message(Ok(msg)) => {
-                    self.last_message_time = Instant::now();
-
-                    match msg {
-                        Message::Text(text) => {
-                            match parse_logs_notification(
-                                &text,
-                                &mut self.dedup,
-                                &mut self.last_seen_slot,
-                            ) {
-                                Some(event) => return Ok(Some(event)),
-                                None => continue,
-                            }
+                Received::Message(Ok(msg)) => match msg {
+                    Message::Text(text) => {
+                        self.last_message_time = Instant::now();
+                        match parse_logs_notification(
+                            &text,
+                            &mut self.dedup,
+                            &mut self.last_seen_slot,
+                        )? {
+                            Some(event) => return Ok(Some(event)),
+                            None => continue,
                         }
-                        Message::Pong(_) => {
-                            self.pending_ping = false;
-                            continue;
-                        }
-                        Message::Ping(data) => {
-                            let ws = self.ws_stream.as_mut().ok_or_else(|| {
-                                PipelineError::WebSocketDisconnect("not connected".into())
-                            })?;
-                            ws.send(Message::Pong(data)).await.map_err(|e| {
-                                PipelineError::WebSocketDisconnect(format!("pong send failed: {e}"))
-                            })?;
-                            continue;
-                        }
-                        Message::Close(_) => {
-                            return Err(PipelineError::WebSocketDisconnect(
-                                "server closed connection".into(),
-                            ));
-                        }
-                        _ => continue,
                     }
-                }
+                    Message::Pong(_) => {
+                        self.last_message_time = Instant::now();
+                        self.pending_ping = false;
+                        continue;
+                    }
+                    Message::Ping(data) => {
+                        self.last_message_time = Instant::now();
+                        let ws = self.ws_stream.as_mut().ok_or_else(|| {
+                            PipelineError::WebSocketDisconnect("not connected".into())
+                        })?;
+                        ws.send(Message::Pong(data)).await.map_err(|e| {
+                            PipelineError::WebSocketDisconnect(format!("pong send failed: {e}"))
+                        })?;
+                        continue;
+                    }
+                    Message::Close(_) => {
+                        return Err(PipelineError::WebSocketDisconnect(
+                            "server closed connection".into(),
+                        ));
+                    }
+                    other => {
+                        debug!(?other, "ignoring unexpected WS frame");
+                        continue;
+                    }
+                },
                 Received::Message(Err(e)) => {
                     return Err(PipelineError::WebSocketDisconnect(e.to_string()));
                 }
@@ -370,12 +476,16 @@ impl TransactionStream for WsTransactionStream {
 
             let _ = ws.send(Message::Text(request.to_string().into())).await;
             let _ = ws.send(Message::Close(None)).await;
+            let _ = ws.flush().await;
+
+            info!(
+                subscription_id = sub_id,
+                "unsubscribed from logsNotification"
+            );
         }
 
         self.ws_stream = None;
         self.subscription_id = None;
-
-        info!("unsubscribed from logsNotification");
 
         Ok(())
     }
@@ -396,27 +506,59 @@ enum Received {
     Timeout,
 }
 
-/// Derive WebSocket URL from an HTTP RPC URL.
+/// Derive WebSocket URL from an HTTP RPC URL. Handles trailing whitespace and
+/// mixed-case schemes in addition to the common `http(s)://` prefixes.
 fn derive_ws_url(rpc_url: &str) -> String {
-    if rpc_url.starts_with("wss://") || rpc_url.starts_with("ws://") {
-        return rpc_url.to_string();
+    let trimmed = rpc_url.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if lowered.starts_with("wss://") || lowered.starts_with("ws://") {
+        return trimmed.to_string();
     }
-    rpc_url
-        .replace("https://", "wss://")
-        .replace("http://", "ws://")
+    if let Some(rest) = trimmed.get("https://".len()..) {
+        if lowered.starts_with("https://") {
+            return format!("wss://{rest}");
+        }
+    }
+    if let Some(rest) = trimmed.get("http://".len()..) {
+        if lowered.starts_with("http://") {
+            return format!("ws://{rest}");
+        }
+    }
+    trimmed.to_string()
 }
 
-/// Parse a JSON-RPC logsNotification into a StreamEvent, applying deduplication.
+/// Parse a JSON-RPC frame. Returns:
+/// - `Ok(Some(event))` on a fresh, non-duplicate logsNotification
+/// - `Ok(None)` on a duplicate notification or non-notification frame that
+///   should be silently skipped
+/// - `Err(...)` on a server-pushed JSON-RPC error (propagated so the pipeline
+///   can reconnect instead of silently ignoring a killed subscription)
 fn parse_logs_notification(
     text: &str,
     dedup: &mut DeduplicationSet,
     last_seen_slot: &mut Option<u64>,
-) -> Option<StreamEvent> {
+) -> Result<Option<StreamEvent>, PipelineError> {
+    // Try generic envelope first to catch server-pushed errors.
+    if let Ok(envelope) = serde_json::from_str::<WsJsonRpcEnvelope>(text) {
+        if let Some(error) = envelope.error {
+            return Err(PipelineError::WebSocketDisconnect(format!(
+                "server-pushed error: {} (code {})",
+                error.message, error.code
+            )));
+        }
+        // If it's neither a notification nor carries useful data, skip.
+        if envelope.method.as_deref() != Some("logsNotification") {
+            debug!(text_preview = %preview(text), "non-notification WS message, skipping");
+            return Ok(None);
+        }
+    }
+
     let notification: LogsNotification = match serde_json::from_str(text) {
         Ok(n) => n,
         Err(_) => {
-            warn!(text_len = text.len(), "malformed WS message, skipping");
-            return None;
+            warn!(text_preview = %preview(text), "malformed logsNotification, skipping");
+            return Ok(None);
         }
     };
 
@@ -424,20 +566,37 @@ fn parse_logs_notification(
     let slot = notification.params.result.context.slot;
     let error = notification.params.result.value.err;
 
-    if !dedup.insert(sig.clone()) {
-        debug!(signature = %sig, "duplicate signature, skipping");
-        return None;
+    // Hard cap on signature length — Solana sigs are 88 base58 chars, so any
+    // absurdly long value is either corruption or a malicious payload.
+    if sig.len() > MAX_SIGNATURE_LEN {
+        warn!(
+            sig_len = sig.len(),
+            "signature exceeds max length, skipping"
+        );
+        return Ok(None);
     }
 
-    if last_seen_slot.map_or(true, |s| slot > s) {
+    // Update slot cursor BEFORE dedup so duplicate-only windows still advance
+    // the cursor — prevents downstream gap detection from over-triggering.
+    if last_seen_slot.is_none_or(|s| slot > s) {
         *last_seen_slot = Some(slot);
     }
 
-    Some(StreamEvent {
+    if !dedup.insert(sig.clone()) {
+        debug!(signature = %sig, "duplicate signature, skipping");
+        return Ok(None);
+    }
+
+    Ok(Some(StreamEvent {
         signature: sig,
         slot,
         error,
-    })
+    }))
+}
+
+/// First 256 chars of a string, for diagnostic logging without blowing up log volume.
+fn preview(text: &str) -> String {
+    text.chars().take(256).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +667,24 @@ mod tests {
         assert_eq!(derive_ws_url("ws://already.good"), "ws://already.good");
     }
 
+    #[test]
+    fn test_derive_ws_url_trims_whitespace() {
+        assert_eq!(
+            derive_ws_url("  https://api.solana.com\n"),
+            "wss://api.solana.com"
+        );
+    }
+
+    #[test]
+    fn test_derive_ws_url_mixed_case() {
+        // Scheme matching is case-insensitive per RFC 3986, but we preserve
+        // host-part casing from the trimmed input.
+        assert_eq!(
+            derive_ws_url("HTTPS://api.solana.com"),
+            "wss://api.solana.com"
+        );
+    }
+
     // -- StreamEvent tests --
 
     #[test]
@@ -527,6 +704,88 @@ mod tests {
             error: Some(serde_json::json!({"InstructionError": [0, "Custom"]})),
         };
         assert!(event_with_err.error.is_some());
+    }
+
+    // -- parse_logs_notification tests --
+
+    #[test]
+    fn test_parse_logs_notification_happy_path() {
+        let mut dedup = DeduplicationSet::new(10);
+        let mut last_slot = None;
+        let frame = r#"{
+            "jsonrpc":"2.0",
+            "method":"logsNotification",
+            "params":{
+                "result":{
+                    "context":{"slot":12345},
+                    "value":{"signature":"sigA","err":null,"logs":[]}
+                },
+                "subscription":1
+            }
+        }"#;
+        let ev = parse_logs_notification(frame, &mut dedup, &mut last_slot)
+            .expect("should parse")
+            .expect("should yield event");
+        assert_eq!(ev.signature, "sigA");
+        assert_eq!(ev.slot, 12345);
+        assert_eq!(last_slot, Some(12345));
+    }
+
+    #[test]
+    fn test_parse_logs_notification_propagates_server_error() {
+        let mut dedup = DeduplicationSet::new(10);
+        let mut last_slot = None;
+        let frame =
+            r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"subscription cancelled"}}"#;
+        let err = parse_logs_notification(frame, &mut dedup, &mut last_slot)
+            .expect_err("server error should propagate");
+        assert!(matches!(err, PipelineError::WebSocketDisconnect(_)));
+    }
+
+    #[test]
+    fn test_parse_logs_notification_rejects_oversized_signature() {
+        let mut dedup = DeduplicationSet::new(10);
+        let mut last_slot = None;
+        let huge_sig = "a".repeat(MAX_SIGNATURE_LEN + 1);
+        let frame = format!(
+            r#"{{
+                "jsonrpc":"2.0",
+                "method":"logsNotification",
+                "params":{{
+                    "result":{{
+                        "context":{{"slot":1}},
+                        "value":{{"signature":"{huge_sig}","err":null,"logs":[]}}
+                    }},
+                    "subscription":1
+                }}
+            }}"#
+        );
+        let result = parse_logs_notification(&frame, &mut dedup, &mut last_slot)
+            .expect("parse should succeed");
+        assert!(result.is_none(), "oversized sig should be skipped");
+        assert_eq!(dedup.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_logs_notification_updates_slot_on_duplicate() {
+        let mut dedup = DeduplicationSet::new(10);
+        let mut last_slot = None;
+
+        let frame1 = r#"{"jsonrpc":"2.0","method":"logsNotification","params":{"result":{"context":{"slot":100},"value":{"signature":"sigX","err":null,"logs":[]}},"subscription":1}}"#;
+        parse_logs_notification(frame1, &mut dedup, &mut last_slot)
+            .expect("first parse should succeed");
+        assert_eq!(last_slot, Some(100));
+
+        // Same sig, later slot — should still advance the slot cursor
+        let frame2 = r#"{"jsonrpc":"2.0","method":"logsNotification","params":{"result":{"context":{"slot":200},"value":{"signature":"sigX","err":null,"logs":[]}},"subscription":1}}"#;
+        let result = parse_logs_notification(frame2, &mut dedup, &mut last_slot)
+            .expect("second parse should succeed");
+        assert!(result.is_none(), "duplicate sig should be skipped");
+        assert_eq!(
+            last_slot,
+            Some(200),
+            "slot cursor must advance even on duplicate"
+        );
     }
 
     // -- Send safety --

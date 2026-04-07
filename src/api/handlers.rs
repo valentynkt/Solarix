@@ -1185,48 +1185,16 @@ mod tests {
 
     // --- Story 5.3: Pagination helpers ---
 
-    fn make_config() -> crate::config::Config {
-        crate::config::Config {
-            rpc_url: String::new(),
-            ws_url: None,
-            database_url: String::new(),
-            db_pool_min: 2,
-            db_pool_max: 10,
-            rpc_rps: 10,
-            backfill_chunk_size: 50_000,
-            start_slot: None,
-            end_slot: None,
-            index_failed_txs: false,
-            api_host: String::new(),
-            api_port: 3000,
-            api_default_page_size: 50,
-            api_max_page_size: 1000,
-            channel_capacity: 256,
-            checkpoint_interval_secs: 10,
-            retry_initial_ms: 500,
-            retry_max_ms: 30_000,
-            retry_timeout_secs: 300,
-            max_consecutive_fetch_failures: 100,
-            ws_ping_interval_secs: 30,
-            ws_pong_timeout_secs: 10,
-            dedup_cache_size: 10_000,
-            shutdown_drain_secs: 15,
-            shutdown_db_flush_secs: 10,
-            log_level: String::new(),
-            log_format: String::new(),
-        }
-    }
-
     #[test]
     fn clamp_limit_default() {
-        let config = make_config();
+        let config = crate::config::Config::test_default();
         let params = HashMap::new();
         assert_eq!(clamp_limit(&params, &config), 50);
     }
 
     #[test]
     fn clamp_limit_valid_value() {
-        let config = make_config();
+        let config = crate::config::Config::test_default();
         let mut params = HashMap::new();
         params.insert("limit".to_string(), "25".to_string());
         assert_eq!(clamp_limit(&params, &config), 25);
@@ -1234,7 +1202,7 @@ mod tests {
 
     #[test]
     fn clamp_limit_over_max_clamped() {
-        let config = make_config();
+        let config = crate::config::Config::test_default();
         let mut params = HashMap::new();
         params.insert("limit".to_string(), "5000".to_string());
         assert_eq!(clamp_limit(&params, &config), 1000);
@@ -1242,7 +1210,7 @@ mod tests {
 
     #[test]
     fn clamp_limit_negative_uses_default() {
-        let config = make_config();
+        let config = crate::config::Config::test_default();
         let mut params = HashMap::new();
         params.insert("limit".to_string(), "-5".to_string());
         assert_eq!(clamp_limit(&params, &config), 50);
@@ -1250,7 +1218,7 @@ mod tests {
 
     #[test]
     fn clamp_limit_zero_uses_default() {
-        let config = make_config();
+        let config = crate::config::Config::test_default();
         let mut params = HashMap::new();
         params.insert("limit".to_string(), "0".to_string());
         assert_eq!(clamp_limit(&params, &config), 50);
@@ -1258,7 +1226,7 @@ mod tests {
 
     #[test]
     fn clamp_limit_non_numeric_uses_default() {
-        let config = make_config();
+        let config = crate::config::Config::test_default();
         let mut params = HashMap::new();
         params.insert("limit".to_string(), "abc".to_string());
         assert_eq!(clamp_limit(&params, &config), 50);
