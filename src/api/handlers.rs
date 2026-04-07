@@ -1494,6 +1494,11 @@ mod tests {
             _check;
     }
 
+    // The axum extractor types (`State<Arc<AppState>>`, `Path<(String, String)>`,
+    // `Query<HashMap<String, String>>`) form a 3-element tuple that clippy
+    // rates as "very complex". Suppressing the lint keeps the Send-check
+    // wiring readable and matches the signature of the production handler.
+    #[allow(clippy::type_complexity)]
     #[test]
     fn test_query_instructions_future_is_send() {
         fn _check(
@@ -1512,6 +1517,7 @@ mod tests {
         ) = _check;
     }
 
+    #[allow(clippy::type_complexity)]
     #[test]
     fn test_query_accounts_future_is_send() {
         fn _check(

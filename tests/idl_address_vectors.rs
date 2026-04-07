@@ -1,3 +1,11 @@
+// Test-only file: allow the standard panic/unwrap/expect patterns so this
+// file does not increase the `cargo clippy --all-targets` error count vs the
+// pre-Story-6.4 baseline (Story 6.4 AC10). The project's clippy.toml sets
+// `allow-expect-in-tests = true` but it only applies inside functions
+// annotated with `#[test]`; helpers that live at module scope need an
+// explicit allow here.
+#![allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
+
 // Anchor IDL PDA address vector regression test for Story 6.4 (AC4).
 //
 // This test asserts that the derivation in `src/idl/fetch.rs:33-38` produces

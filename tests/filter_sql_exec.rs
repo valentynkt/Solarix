@@ -36,6 +36,7 @@
 //   cargo test --features integration --test filter_sql_exec -- --ignored
 
 #![cfg(feature = "integration")]
+#![allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 
 // ---------------------------------------------------------------------------
 // Stub scaffolding — replaced by tests/common/postgres.rs in Story 6.5

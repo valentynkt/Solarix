@@ -27,6 +27,7 @@
 // body.
 
 #![cfg(feature = "integration")]
+#![allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;

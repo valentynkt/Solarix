@@ -1,3 +1,8 @@
+// Test-only file: allow panic/unwrap/expect so this file does not increase
+// the `cargo clippy --all-targets` error count vs the pre-Story-6.4
+// baseline (Story 6.4 AC10).
+#![allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
+
 // Schema generator snapshot tests for Story 6.4 (AC5).
 //
 // This file captures the output of `build_ddl_statements` against three

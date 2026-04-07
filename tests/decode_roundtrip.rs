@@ -1,3 +1,8 @@
+// Test-only file: allow panic/unwrap/expect so this file does not increase
+// the `cargo clippy --all-targets` error count vs the pre-Story-6.4
+// baseline (Story 6.4 AC10).
+#![allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
+
 // Decoder Borsh roundtrip property tests for Story 6.4 (AC1, AC2).
 //
 // For every IDL primitive supported by the Solarix decoder, this file:

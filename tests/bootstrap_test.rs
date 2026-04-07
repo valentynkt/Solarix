@@ -1,3 +1,10 @@
+// Test-only file: the pre-Story-6.4 version used `.expect()` inside a
+// `#[tokio::test]` body (covered by clippy.toml `allow-expect-in-tests`).
+// Story 6.4 extracts the pool setup into a helper function, so we need an
+// explicit allow here to keep the file's `cargo clippy --all-targets`
+// contribution at 0 vs the pre-Story-6.4 baseline (Story 6.4 AC10).
+#![allow(clippy::expect_used)]
+
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 

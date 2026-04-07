@@ -1,3 +1,8 @@
+// Test-only file: allow panic/unwrap/expect so this file does not increase
+// the `cargo clippy --all-targets` error count vs the pre-Story-6.4
+// baseline (Story 6.4 AC10).
+#![allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
+
 // Filter builder SQL contract matrix for Story 6.4 (AC6).
 //
 // This test file asserts the SQL shape produced by `build_query` for every
