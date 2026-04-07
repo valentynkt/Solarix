@@ -84,6 +84,11 @@ pub enum InitialState {
 ///
 /// Takes resolved slot values and returns the initial state without
 /// performing any I/O. This makes it trivially unit-testable.
+///
+/// Drift tolerance: a checkpoint or `start_slot` exactly 1 slot ahead of the
+/// chain tip is accepted as `Stream` (covers benign RPC lag). Anything more is
+/// a `Fatal` error — the symmetry between checkpoint-ahead and start-slot-ahead
+/// prevents the operator from silently passing a bogus `SOLARIX_START_SLOT`.
 pub fn decide_initial_state(
     last_checkpoint_slot: Option<u64>,
     chain_tip: u64,
@@ -97,7 +102,13 @@ pub fn decide_initial_state(
                     start_slot: start,
                     end_slot: chain_tip,
                 }),
-                _ => Ok(InitialState::Stream),
+                Some(start) if start <= chain_tip.saturating_add(1) => Ok(InitialState::Stream),
+                Some(start) => Err(PipelineError::Fatal(format!(
+                    "configured start_slot ({start}) is ahead of chain tip ({chain_tip}). \
+                     Possible causes: wrong cluster, RPC behind, or misconfigured \
+                     SOLARIX_START_SLOT."
+                ))),
+                None => Ok(InitialState::Stream),
             }
         }
         Some(last) => {
@@ -253,21 +264,38 @@ impl PipelineOrchestrator {
     }
 
     /// Determine the initial pipeline state based on existing checkpoints and chain tip.
+    ///
+    /// Reads all three checkpoint streams (`backfill`, `realtime`, `catchup`) and takes
+    /// the highest known slot. The `catchup` stream is written by `mini_backfill` after
+    /// a WS reconnect; ignoring it would forget post-reconnect progress on restart.
     pub async fn determine_initial_state(
         &self,
-        _program_id: &str,
         schema_name: &str,
     ) -> Result<InitialState, PipelineError> {
-        // Read both checkpoint streams and take the max
+        // Read all checkpoint streams and take the max
         let backfill_cp = self.writer.read_checkpoint(schema_name, "backfill").await?;
         let realtime_cp = self.writer.read_checkpoint(schema_name, "realtime").await?;
+        let catchup_cp = self.writer.read_checkpoint(schema_name, "catchup").await?;
 
-        let last_slot = [backfill_cp, realtime_cp]
+        let last_slot = [backfill_cp, realtime_cp, catchup_cp]
             .iter()
             .filter_map(|cp| cp.as_ref().map(|c| c.last_slot))
             .max();
 
         let chain_tip = self.rpc.get_slot().await?;
+
+        // Drift warning: checkpoint slightly ahead of chain tip is benign (RPC lag)
+        // but worth surfacing — it can also indicate a wrong cluster after a DB restore.
+        if let Some(last) = last_slot {
+            if last > chain_tip {
+                warn!(
+                    last_checkpoint = last,
+                    chain_tip,
+                    drift = last - chain_tip,
+                    "checkpoint ahead of chain tip; tolerated within 1 slot but verify cluster + RPC node"
+                );
+            }
+        }
 
         let state = decide_initial_state(last_slot, chain_tip, self.config.start_slot)?;
 
@@ -277,7 +305,8 @@ impl PipelineOrchestrator {
                 end_slot,
             } => {
                 info!(
-                    last_checkpoint = last_slot,
+                    last_checkpoint = last_slot.unwrap_or(0),
+                    has_checkpoint = last_slot.is_some(),
                     chain_tip,
                     gap_start = start_slot,
                     gap_end = end_slot,
@@ -286,8 +315,10 @@ impl PipelineOrchestrator {
             }
             InitialState::Stream => {
                 info!(
-                    last_checkpoint = last_slot,
-                    chain_tip, "cold start: streaming from tip"
+                    last_checkpoint = last_slot.unwrap_or(0),
+                    has_checkpoint = last_slot.is_some(),
+                    chain_tip,
+                    "cold start: streaming from tip"
                 );
             }
         }
@@ -309,9 +340,7 @@ impl PipelineOrchestrator {
             return Ok(());
         }
 
-        let initial = self
-            .determine_initial_state(program_id, schema_name)
-            .await?;
+        let initial = self.determine_initial_state(schema_name).await?;
 
         match initial {
             InitialState::Stream => self.run_streaming(program_id, schema_name, idl).await,
@@ -344,20 +373,71 @@ impl PipelineOrchestrator {
 
                 match backfill_result {
                     Ok(()) => {
+                        // Tail-backfill the gap that opened between the snapshotted
+                        // chain_tip (`end_slot`) and the WS subscription's first event.
+                        // Without this, slots in (end_slot, first_ws_slot) are processed
+                        // by neither path on cold start. Skipped if streaming has already
+                        // overtaken end_slot or if cancellation was requested.
+                        if !self.cancel.is_cancelled() {
+                            match self.rpc.get_slot().await {
+                                Ok(tail_end) if tail_end > end_slot => {
+                                    info!(
+                                        tail_start = end_slot + 1,
+                                        tail_end,
+                                        "backfill complete, closing handoff gap to streaming"
+                                    );
+                                    if let Err(e) = self
+                                        .run_backfill(
+                                            program_id,
+                                            schema_name,
+                                            idl,
+                                            end_slot + 1,
+                                            tail_end,
+                                        )
+                                        .await
+                                    {
+                                        warn!(error = %e, "tail backfill failed; relying on streaming + dedup");
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!(error = %e, "failed to fetch chain tip for tail backfill; relying on streaming + dedup");
+                                }
+                            }
+                        }
+
                         info!("backfill complete, streaming continues");
-                        // Wait for streaming (exits on cancel or fatal error)
-                        match stream_handle.await {
+                        // Wait for streaming (exits on cancel or fatal error).
+                        let stream_result = match stream_handle.await {
                             Ok(Ok(())) => Ok(()),
                             Ok(Err(e)) => Err(e),
                             Err(e) => Err(PipelineError::Fatal(format!(
                                 "streaming task panicked: {e}"
                             ))),
-                        }
+                        };
+                        // Detach the child token whether stream succeeded or failed —
+                        // prevents leaking child tokens off the parent across long runs.
+                        stream_cancel.cancel();
+                        stream_result
                     }
                     Err(e) => {
                         error!(error = %e, "backfill failed, cancelling streaming");
                         stream_cancel.cancel();
-                        let _ = stream_handle.await;
+                        match stream_handle.await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(stream_err)) => {
+                                error!(
+                                    error = %stream_err,
+                                    "streaming task also failed during backfill cancellation"
+                                );
+                            }
+                            Err(join_err) => {
+                                error!(
+                                    error = %join_err,
+                                    "streaming task panicked during backfill cancellation"
+                                );
+                            }
+                        }
                         Err(e)
                     }
                 }
@@ -1253,7 +1333,7 @@ fn compute_backfill_chunks(start: u64, end: u64, chunk_size: u64) -> Vec<(u64, u
 // ---------------------------------------------------------------------------
 
 /// Update the indexer_state row for a program.
-async fn update_indexer_state(
+pub async fn update_indexer_state(
     pool: &PgPool,
     program_id: &str,
     status: &str,
@@ -1988,7 +2068,9 @@ mod tests {
 
     #[test]
     fn test_run_streaming_is_send() {
-        // Compile-time check that run_streaming future is Send
+        // Compile-time check that run_streaming future is Send.
+        // The fn-pointer cast forces monomorphization regardless of test body
+        // execution — see MEMORY.md story 5-1 lesson on `_require_send` patterns.
         fn _check(o: &PipelineOrchestrator) {
             fn _require_send<T: Send>(_: &T) {}
             let idl = serde_json::from_value::<Idl>(serde_json::json!({
@@ -2002,6 +2084,7 @@ mod tests {
             let fut = o.run_streaming("prog", "schema", &idl);
             _require_send(&fut);
         }
+        let _: fn(&PipelineOrchestrator) = _check;
     }
 
     #[test]
@@ -2085,6 +2168,25 @@ mod tests {
     }
 
     #[test]
+    fn test_decide_initial_state_fresh_start_slot_one_ahead() {
+        // No checkpoint, start_slot exactly 1 ahead → tolerated as Stream
+        let result = decide_initial_state(None, 200, Some(201));
+        assert_eq!(result.expect("should succeed"), InitialState::Stream);
+    }
+
+    #[test]
+    fn test_decide_initial_state_fresh_start_slot_far_ahead() {
+        // No checkpoint, start_slot >> chain tip → fatal (symmetric to checkpoint-ahead)
+        let result = decide_initial_state(None, 200, Some(999_999));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PipelineError::Fatal(ref msg) if msg.contains("start_slot")),
+            "expected fatal error about start_slot ahead, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_shutdown_config_defaults() {
         let config = make_test_config();
         assert_eq!(config.shutdown_drain_secs, 15);
@@ -2093,7 +2195,9 @@ mod tests {
 
     #[test]
     fn test_run_is_send() {
-        // Compile-time check that run() future is Send
+        // Compile-time check that run() future is Send.
+        // The fn-pointer cast at the bottom forces monomorphization regardless of
+        // test body execution — see MEMORY.md story 5-1 lesson.
         fn _check(o: &PipelineOrchestrator) {
             fn _require_send<T: Send>(_: &T) {}
             let idl = serde_json::from_value::<Idl>(serde_json::json!({
@@ -2107,6 +2211,7 @@ mod tests {
             let fut = o.run("prog", "schema", &idl);
             _require_send(&fut);
         }
+        let _: fn(&PipelineOrchestrator) = _check;
     }
 
     #[test]
