@@ -1,3 +1,7 @@
+// `expect` is fine in integration test helpers; clippy's `allow-expect-in-tests`
+// knob only exempts `#[test]` fns and `#[cfg(test)]` modules.
+#![allow(clippy::expect_used)]
+
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
 

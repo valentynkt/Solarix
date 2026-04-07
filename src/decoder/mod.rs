@@ -192,7 +192,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// Returns true if the failure rate exceeds 90%, indicating likely IDL mismatch.
 pub fn is_high_failure_rate(failures: usize, total: usize) -> bool {
-    total > 0 && failures.checked_mul(100).map_or(true, |v| v / total > 90)
+    total > 0 && failures.checked_mul(100).is_none_or(|v| v / total > 90)
 }
 
 // ---------------------------------------------------------------------------
@@ -454,14 +454,13 @@ fn decode_type(
             // Build generic bindings if any
             let mut local_generics = generics.clone();
             for (def_gen, arg) in typedef.generics.iter().zip(generic_args.iter()) {
-                match (def_gen, arg) {
-                    (
-                        anchor_lang_idl_spec::IdlTypeDefGeneric::Type { name },
-                        IdlGenericArg::Type { ty },
-                    ) => {
-                        local_generics.insert(name.clone(), ty.clone());
-                    }
-                    _ => {} // Const generics handled via IdlArrayLen::Generic
+                // Const generics handled via IdlArrayLen::Generic; only bind type generics here.
+                if let (
+                    anchor_lang_idl_spec::IdlTypeDefGeneric::Type { name },
+                    IdlGenericArg::Type { ty },
+                ) = (def_gen, arg)
+                {
+                    local_generics.insert(name.clone(), ty.clone());
                 }
             }
 

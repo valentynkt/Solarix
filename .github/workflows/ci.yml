@@ -1,0 +1,316 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Hard-gate jobs (required on every PR to main).
+  # ---------------------------------------------------------------------------
+
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install toolchain (pinned MSRV via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+          components: rustfmt, clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci"
+      - name: cargo fmt --check
+        run: cargo fmt -- --check
+      - name: cargo clippy (all-targets, -D warnings)
+        run: cargo clippy --release --all-targets -- -D warnings
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci"
+      - name: cargo test --lib
+        run: cargo test --release --lib
+
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: solarix
+          POSTGRES_USER: solarix
+          POSTGRES_PASSWORD: solarix
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U solarix -d solarix"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://solarix:solarix@localhost:5432/solarix
+      SOLANA_RPC_URL: https://api.devnet.solana.com
+      RUST_LOG: warn
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci"
+      - name: Run integration tests (branches on 6.5 feature flag)
+        run: |
+          # Story 6.5 adds `[features] integration = []` to Cargo.toml and the
+          # `tests/common/postgres.rs` harness. Until the harness lands, run the
+          # existing bootstrap_test.rs / registration_test.rs against the
+          # postgres service container above. The feature guard check below
+          # automatically flips to `--features integration` once Cargo.toml
+          # declares it.
+          if grep -q '^integration\b' Cargo.toml; then
+            cargo test --release --tests --features integration
+          else
+            cargo test --release --tests
+          fi
+
+  coverage:
+    name: coverage (lcov artifact)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+          components: llvm-tools-preview
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci"
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Run coverage (lib only — see ADR-0002 D6)
+        run: cargo llvm-cov --release --lib --lcov --output-path lcov.info
+      - name: Print coverage summary
+        run: cargo llvm-cov report --summary-only
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-info
+          path: lcov.info
+          retention-days: 14
+
+  fuzz-smoke:
+    name: fuzz smoke (60s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # Soft-gate: no-op until Story 6.4 ships the fuzz target.
+    if: hashFiles('fuzz/Cargo.toml') != ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci-nightly"
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      - name: Run fuzz smoke
+        run: cargo +nightly fuzz run decode_instruction -- -max_total_time=60
+
+  security:
+    name: security (audit + deny + gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans against the diff base, and a future audit step may
+          # want history too.
+          fetch-depth: 0
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci"
+      - name: Install cargo-audit and cargo-deny
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+      - name: cargo audit
+        run: cargo audit --deny warnings
+      - name: cargo deny check
+        run: cargo deny check
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          config: .gitleaks.toml
+
+  docker-smoke:
+    name: docker smoke (compose up → /health → logs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Inherited by `docker-compose.yml`'s `${SOLANA_RPC_URL:-...}` expansion.
+      # `docker-compose.yml` wires DATABASE_URL itself via the postgres service;
+      # the workflow must NOT set DATABASE_URL at this level.
+      SOLANA_RPC_URL: https://api.devnet.solana.com
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Reset any stale compose state
+        run: docker compose down -v || true
+      - name: docker compose up --build -d
+        run: docker compose up --build -d
+      - name: Wait for /health
+        run: |
+          curl --retry 12 --retry-delay 5 --retry-connrefused --fail \
+            http://localhost:3000/health
+      - name: Soft-check /ready (warning only until Story 6.3)
+        run: |
+          if curl -fsS http://localhost:3000/ready; then
+            echo "/ready ok"
+          else
+            echo "::warning::/ready not yet implemented (Story 6.3)"
+          fi
+      - name: Log format check (head -5 must be valid JSON)
+        run: |
+          set -euo pipefail
+          docker compose logs solarix --no-log-prefix > /tmp/solarix.log
+          head -5 /tmp/solarix.log | grep -v '^$' > /tmp/solarix-head.log || true
+          if [ ! -s /tmp/solarix-head.log ]; then
+            echo "::error::No log lines captured from solarix container"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, sys
+          path = "/tmp/solarix-head.log"
+          for i, line in enumerate(open(path), 1):
+              line = line.strip()
+              if not line:
+                  continue
+              try:
+                  json.loads(line)
+              except json.JSONDecodeError as e:
+                  print(f"::error::Non-JSON log line {i}: {line}")
+                  sys.exit(1)
+          print("All captured log lines are valid JSON")
+          PY
+      - name: Soft-check /metrics (warning only until Story 6.2)
+        run: |
+          if curl -fsS http://localhost:3000/metrics | grep -q solarix_build_info; then
+            echo "metrics ok"
+          else
+            echo "::warning::/metrics not yet implemented (Story 6.2)"
+          fi
+      - name: Capture logs on failure
+        if: failure()
+        run: docker compose logs solarix > solarix.log 2>&1 || true
+      - name: Upload logs artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-smoke-logs
+          path: solarix.log
+          retention-days: 7
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v || true
+
+  msrv:
+    name: msrv build (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install pinned MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci"
+      - name: cargo build --release
+        run: cargo build --release
+
+  toolchain-matrix:
+    name: toolchain matrix (stable, beta)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    continue-on-error: ${{ matrix.toolchain == 'beta' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install ${{ matrix.toolchain }} toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci-${{ matrix.toolchain }}"
+      - name: cargo build --release
+        # Override the pinned rust-toolchain.toml channel for this job — the
+        # point of the matrix is to exercise stable and beta against the same
+        # Cargo.lock.
+        env:
+          RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+        run: cargo build --release

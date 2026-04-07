@@ -783,7 +783,7 @@ fn classify_rpc_error(err: JsonRpcError) -> PipelineError {
             // Node is behind — transient
             PipelineError::RpcFailed(format!("node behind: {}", err.message))
         }
-        -32600 | -32601 | -32602 => {
+        -32602..=-32600 => {
             // Invalid request / method not found / invalid params — permanent
             PipelineError::Fatal(format!("RPC protocol error {}: {}", err.code, err.message))
         }

@@ -1,0 +1,89 @@
+# Placeholder until Story 6.5 ships tests/mainnet_smoke.rs and the
+# mainnet-smoke cargo feature. The job is fully gated on the existence of
+# `tests/mainnet_smoke.rs` so the cron stays a no-op until then — without
+# the guard, the cron would be permanently red on Day 1 because the feature
+# and the test file do not yet exist.
+name: Nightly Mainnet Smoke
+
+on:
+  schedule:
+    # 06:00 UTC every day.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: nightly-mainnet-smoke
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  mainnet-smoke:
+    name: mainnet smoke (devnet pipeline → mainnet reads)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    # Soft-gate: this workflow is a no-op until Story 6.5 ships the test file
+    # AND the `mainnet-smoke` cargo feature. Without this guard,
+    # `cargo test --features mainnet-smoke` would error out with
+    # "feature `mainnet-smoke` does not exist" and the cron would be red.
+    if: hashFiles('tests/mainnet_smoke.rs') != ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install toolchain (pinned MSRV)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - name: Cache cargo registry + target (separate from per-PR cache)
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Deliberately separate from `solarix-ci` so the cron run does not
+          # pollute the per-PR cache.
+          shared-key: "solarix-nightly"
+      - name: Run mainnet smoke
+        env:
+          # Devnet for the pipeline, mainnet only for the specific reads the
+          # smoke test needs. Story 6.5 owns the exact test surface.
+          SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+        run: cargo test --release --features mainnet-smoke -- mainnet_smoke
+      - name: Comment on most recent merged PR on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            // Walk git log for the latest merge commit and post a comment to
+            // the associated PR. Falls back to logging if no PR is found.
+            const { data: commits } = await github.rest.repos.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: 'main',
+              per_page: 20,
+            });
+            for (const commit of commits) {
+              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: commit.sha,
+              });
+              const merged = prs.find((pr) => pr.merged_at);
+              if (merged) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: merged.number,
+                  body: `:rotating_light: Nightly mainnet smoke failed on \`main\`: ${runUrl}`,
+                });
+                core.info(`Posted failure comment to PR #${merged.number}`);
+                return;
+              }
+            }
+            core.warning(`No recent merged PR found to notify; run: ${runUrl}`);

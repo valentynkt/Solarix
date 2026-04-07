@@ -1,0 +1,15 @@
+title = "Solarix gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Solana pubkeys in fixtures and planning artifacts are not secrets"
+paths = [
+  '''tests/fixtures/.*''',
+  '''_bmad-output/.*''',
+  '''docs/research/.*''',
+  '''.*\.md$''',
+]
+# Base58 strings of 32–44 chars are Solana pubkeys, not secrets.
+regexes = ['''[1-9A-HJ-NP-Za-km-z]{32,44}''']

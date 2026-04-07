@@ -10,6 +10,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"
+# anchor-lang-idl-spec is a type the fuzz targets name directly (not re-exported
+# by solarix), so the fuzz crate declares it as its own dep. Version must stay
+# in lockstep with the main crate's dep.
+anchor-lang-idl-spec = "0.1.0"
 
 [dependencies.solarix]
 path = ".."

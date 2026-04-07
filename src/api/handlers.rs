@@ -527,11 +527,8 @@ fn get_account_fields(account_name: &str, types: &[IdlTypeDef]) -> Result<Vec<Id
         .ok_or_else(|| ApiError::AccountTypeNotFound(account_name.to_string()))?;
     match &type_def.ty {
         IdlTypeDefTy::Struct {
-            fields: Some(fields),
-        } => match fields {
-            IdlDefinedFields::Named(named) => Ok(named.clone()),
-            _ => Ok(vec![]),
-        },
+            fields: Some(IdlDefinedFields::Named(named)),
+        } => Ok(named.clone()),
         _ => Ok(vec![]),
     }
 }
@@ -857,8 +854,7 @@ fn validate_interval(params: &HashMap<String, String>) -> Result<&'static str, A
         .copied()
         .ok_or_else(|| {
             ApiError::InvalidValue(format!(
-                "invalid interval '{}'. Must be one of: minute, hour, day, week, month",
-                raw
+                "invalid interval '{raw}'. Must be one of: minute, hour, day, week, month"
             ))
         })
 }
@@ -870,7 +866,7 @@ fn parse_optional_i64(
     match params.get(key) {
         None => Ok(None),
         Some(v) => v.parse::<i64>().map(Some).map_err(|_| {
-            ApiError::InvalidValue(format!("'{}' must be a Unix timestamp integer", key))
+            ApiError::InvalidValue(format!("'{key}' must be a Unix timestamp integer"))
         }),
     }
 }
@@ -935,8 +931,7 @@ pub async fn instruction_count(
 
     if rows.len() as i64 > MAX_BUCKETS {
         return Err(ApiError::InvalidValue(format!(
-            "query produced more than {} time buckets. Narrow the time range or use a coarser interval",
-            MAX_BUCKETS
+            "query produced more than {MAX_BUCKETS} time buckets. Narrow the time range or use a coarser interval"
         )));
     }
 
@@ -1375,7 +1370,7 @@ mod tests {
             let mut params = HashMap::new();
             params.insert("interval".to_string(), v.to_string());
             let result = validate_interval(&params);
-            assert!(result.is_ok(), "expected '{}' to be valid", v);
+            assert!(result.is_ok(), "expected '{v}' to be valid");
             assert_eq!(result.unwrap(), v);
         }
     }
@@ -1387,7 +1382,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::InvalidValue(msg) => assert!(msg.contains("required")),
-            other => panic!("expected InvalidValue, got {:?}", other),
+            other => panic!("expected InvalidValue, got {other:?}"),
         }
     }
 
@@ -1402,7 +1397,7 @@ mod tests {
                 assert!(msg.contains("year"));
                 assert!(msg.contains("Must be one of"));
             }
-            other => panic!("expected InvalidValue, got {:?}", other),
+            other => panic!("expected InvalidValue, got {other:?}"),
         }
     }
 
@@ -1449,7 +1444,7 @@ mod tests {
                 assert!(msg.contains("from"));
                 assert!(msg.contains("Unix timestamp"));
             }
-            other => panic!("expected InvalidValue, got {:?}", other),
+            other => panic!("expected InvalidValue, got {other:?}"),
         }
     }
 

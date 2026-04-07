@@ -1,5 +1,7 @@
 # Solarix
 
+[![CI](https://github.com/valentynkit/Solarix/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/valentynkit/Solarix/actions/workflows/ci.yml)
+
 **Universal Solana indexer** that dynamically generates PostgreSQL schemas from any Anchor IDL at runtime.
 
 No codegen. No recompile. No redeploy. Give it a program ID and it fetches the IDL, creates typed tables, indexes transactions and account states, and exposes a REST API for queries.
@@ -324,6 +326,24 @@ cargo test               # 251 tests across 5 suites
 cargo clippy             # strict lints (unwrap/expect/panic denied)
 cargo fmt -- --check     # formatting check
 ```
+
+### Continuous Integration
+
+Every push to `main` and every PR against `main` is gated by the
+[`ci.yml`](.github/workflows/ci.yml) GitHub Actions workflow. The pipeline runs
+nine jobs in parallel on `ubuntu-latest` (`lint`, `unit`, `integration`,
+`coverage`, `fuzz-smoke`, `security`, `docker-smoke`, `msrv`, and a
+`toolchain-matrix` over stable / beta) and targets an end-to-end runtime under
+12 minutes with a shared `Swatinem/rust-cache` key. A few jobs that depend on
+artifacts produced by later Epic-6 stories (the fuzz target, `/ready`,
+`/metrics`, the testcontainer harness, and the `mainnet-smoke` cargo feature)
+start life as **soft gates** — they sit behind `hashFiles(...)` guards and
+become hard gates automatically as soon as the dependency story lands. A
+separate [`nightly.yml`](.github/workflows/nightly.yml) workflow runs the
+mainnet smoke test on a daily cron so flaky external services never block a
+PR. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local-reproduction commands
+and [`docs/adr/0002-ci-pipeline.md`](docs/adr/0002-ci-pipeline.md) for the
+architecture rationale.
 
 ### Local Setup (without Docker)
 

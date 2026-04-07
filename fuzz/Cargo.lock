@@ -2272,6 +2272,7 @@ dependencies = [
 name = "solarix-fuzz"
 version = "0.0.0"
 dependencies = [
+ "anchor-lang-idl-spec",
  "libfuzzer-sys",
  "serde_json",
  "solarix",

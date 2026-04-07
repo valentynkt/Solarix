@@ -581,6 +581,9 @@ impl PipelineOrchestrator {
     }
 
     /// Process a single operational chunk of the backfill.
+    // allow: refactoring this 9-arg function to take a struct is out of scope
+    // for the CI story (6.7); a follow-up refactor story will revisit.
+    #[allow(clippy::too_many_arguments)]
     async fn process_chunk(
         &self,
         program_id: &str,
@@ -1274,6 +1277,9 @@ fn instruction_targets_program(
 }
 
 /// Enrich a decoded instruction with transaction context.
+// allow: refactoring this 9-arg function to take a struct is out of scope
+// for the CI story (6.7); a follow-up refactor story will revisit.
+#[allow(clippy::too_many_arguments)]
 fn enrich_instruction(
     di: &mut DecodedInstruction,
     signature: &str,
@@ -1736,9 +1742,9 @@ mod tests {
     #[test]
     fn test_backfill_progress_eta() {
         let p = BackfillProgress::new(0, 1000);
-        // ETA is non-negative
-        let eta = p.eta();
-        assert!(eta.as_secs() >= 0);
+        // ETA is a Duration (non-negative by construction); just make sure the
+        // call path doesn't panic.
+        let _ = p.eta();
     }
 
     // -- decode failure rate (uses is_high_failure_rate from decoder) --
@@ -1792,7 +1798,9 @@ mod tests {
         }
     }
 
-    /// Mock decoder that always fails.
+    /// Mock decoder that always fails. Kept as scaffolding for decode-failure
+    /// tests that are added in later stories.
+    #[allow(dead_code)]
     struct FailDecoder;
 
     impl SolarixDecoder for FailDecoder {
