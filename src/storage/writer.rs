@@ -530,22 +530,50 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // -- Send safety compile-time checks --
+    // -----------------------------------------------------------------------
+    // Send-safety compile-time checks (Story 6.4 AC9)
+    //
+    // The legacy `_assert_*` helpers below (pre-Story-6.4) were never
+    // monomorphized because they were free functions inside `#[cfg(test)]`
+    // never called from any `#[test]`. They are kept for historical context
+    // but the actual Send check now lives in `test_write_block_future_is_send`
+    // which uses the `fn _check` + `let _: fn = _check;` fn-pointer cast
+    // pattern that forces monomorphization — see `src/idl/mod.rs` test module
+    // doc comment and `_bmad-output/problem-solution-2026-04-06.md` for the
+    // underlying !Send lesson.
+    // -----------------------------------------------------------------------
 
     fn _assert_send<T: Send>(_: &T) {}
 
+    // Kept (pre-6.4, tautological): StorageWriter itself must be Send.
     fn _assert_writer_send(w: &StorageWriter) {
         _assert_send(w);
     }
 
-    fn _assert_write_block_future_send(w: &StorageWriter) {
-        let fut = w.write_block("s", "stream", &[], &[], 0, None);
-        _assert_send(&fut);
-    }
-
+    // Kept (pre-6.4, never actually monomorphized — see module comment above).
     fn _assert_read_checkpoint_future_send(w: &StorageWriter) {
         let fut = w.read_checkpoint("s", "stream");
         _assert_send(&fut);
+    }
+
+    #[test]
+    fn test_write_block_future_is_send() {
+        fn _check(w: &StorageWriter) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = w.write_block("s", "stream", &[], &[], 0, None);
+            _require_send(&fut);
+        }
+        let _: fn(&StorageWriter) = _check;
+    }
+
+    #[test]
+    fn test_read_checkpoint_future_is_send() {
+        fn _check(w: &StorageWriter) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = w.read_checkpoint("s", "stream");
+            _require_send(&fut);
+        }
+        let _: fn(&StorageWriter) = _check;
     }
 
     // -- safe_u64_to_i64 tests --

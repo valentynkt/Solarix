@@ -1,0 +1,68 @@
+{
+  "address": "11111111111111111111111111111111",
+  "metadata": {
+    "name": "reserved_collision_program",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Fixture IDL for Story 6.4: asserts that fields colliding with reserved account columns (pubkey, data, slot_updated, lamports, is_closed, updated_at, write_version) are NOT promoted to native columns and that digit-prefix / reserved-word identifiers are sanitized. Each account table reflects one axis of the collision matrix."
+  },
+  "instructions": [
+    {
+      "name": "noop",
+      "discriminator": [0, 0, 0, 0, 0, 0, 0, 0],
+      "accounts": [],
+      "args": []
+    }
+  ],
+  "accounts": [
+    {
+      "name": "ReservedCollisionAccount",
+      "discriminator": [1, 2, 3, 4, 5, 6, 7, 8]
+    },
+    {
+      "name": "9DigitPrefixAccount",
+      "discriminator": [2, 3, 4, 5, 6, 7, 8, 9]
+    },
+    { "name": "SelectAccount", "discriminator": [3, 4, 5, 6, 7, 8, 9, 10] }
+  ],
+  "types": [
+    {
+      "name": "ReservedCollisionAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "pubkey", "type": "pubkey" },
+          { "name": "data", "type": "string" },
+          { "name": "slot_updated", "type": "u64" },
+          { "name": "lamports", "type": "u64" },
+          { "name": "is_closed", "type": "bool" },
+          { "name": "updated_at", "type": "i64" },
+          { "name": "write_version", "type": "u64" },
+          { "name": "real_column", "type": "u64" },
+          { "name": "another_real", "type": "string" }
+        ]
+      }
+    },
+    {
+      "name": "9DigitPrefixAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "9start_field", "type": "u64" },
+          { "name": "normal_field", "type": "string" }
+        ]
+      }
+    },
+    {
+      "name": "SelectAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "select", "type": "u64" },
+          { "name": "from", "type": "string" },
+          { "name": "where", "type": "bool" }
+        ]
+      }
+    }
+  ]
+}

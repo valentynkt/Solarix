@@ -1469,4 +1469,64 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], "INVALID_VALUE");
     }
+
+    // -----------------------------------------------------------------------
+    // Send-safety compile-time checks (Story 6.4 AC9)
+    //
+    // See `src/idl/mod.rs` test module doc comment for rationale. Short
+    // version: `fn _check` + `let _: fn = _check;` forces monomorphization so
+    // the `T: Send` bound on the handler future is actually checked, and the
+    // axum runtime can safely spawn these handlers on a multi-thread runtime.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_do_register_future_is_send() {
+        fn _check(
+            registry: Arc<tokio::sync::RwLock<ProgramRegistry>>,
+            pool: sqlx::PgPool,
+            body: RegisterProgramRequest,
+        ) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = do_register(registry, pool, body);
+            _require_send(&fut);
+        }
+        let _: fn(Arc<tokio::sync::RwLock<ProgramRegistry>>, sqlx::PgPool, RegisterProgramRequest) =
+            _check;
+    }
+
+    #[test]
+    fn test_query_instructions_future_is_send() {
+        fn _check(
+            state: axum::extract::State<Arc<AppState>>,
+            path: axum::extract::Path<(String, String)>,
+            query: axum::extract::Query<HashMap<String, String>>,
+        ) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = query_instructions(state, path, query);
+            _require_send(&fut);
+        }
+        let _: fn(
+            axum::extract::State<Arc<AppState>>,
+            axum::extract::Path<(String, String)>,
+            axum::extract::Query<HashMap<String, String>>,
+        ) = _check;
+    }
+
+    #[test]
+    fn test_query_accounts_future_is_send() {
+        fn _check(
+            state: axum::extract::State<Arc<AppState>>,
+            path: axum::extract::Path<(String, String)>,
+            query: axum::extract::Query<HashMap<String, String>>,
+        ) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = query_accounts(state, path, query);
+            _require_send(&fut);
+        }
+        let _: fn(
+            axum::extract::State<Arc<AppState>>,
+            axum::extract::Path<(String, String)>,
+            axum::extract::Query<HashMap<String, String>>,
+        ) = _check;
+    }
 }

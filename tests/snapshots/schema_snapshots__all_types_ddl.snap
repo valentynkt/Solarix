@@ -1,0 +1,103 @@
+---
+source: tests/schema_snapshots.rs
+expression: joined
+---
+CREATE SCHEMA IF NOT EXISTS "test_snapshot_all_types";
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_all_types"."_metadata" (
+    "key" TEXT PRIMARY KEY,
+    "value" JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_all_types"."_checkpoints" (
+    "stream" TEXT PRIMARY KEY,
+    "last_slot" BIGINT,
+    "last_signature" VARCHAR(88),
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_all_types"."allprimitivesaccount" (
+    "pubkey" TEXT PRIMARY KEY,
+    "slot_updated" BIGINT NOT NULL,
+    "write_version" BIGINT NOT NULL DEFAULT 0,
+    "lamports" BIGINT NOT NULL,
+    "data" JSONB NOT NULL,
+    "is_closed" BOOLEAN NOT NULL DEFAULT FALSE,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "authority" TEXT,
+    "counter" BIGINT,
+    "small_flag" BOOLEAN,
+    "tiny_u" SMALLINT,
+    "tiny_i" SMALLINT,
+    "medium_u" INTEGER,
+    "medium_i" INTEGER,
+    "float32" REAL,
+    "float64" DOUBLE PRECISION,
+    "huge_unsigned" NUMERIC(39,0),
+    "huge_signed" NUMERIC(39,0),
+    "label" TEXT,
+    "blob" BYTEA,
+    "fixed_key" BYTEA,
+    "trailing_opt" BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_all_types"."nestedstructaccount" (
+    "pubkey" TEXT PRIMARY KEY,
+    "slot_updated" BIGINT NOT NULL,
+    "write_version" BIGINT NOT NULL DEFAULT 0,
+    "lamports" BIGINT NOT NULL,
+    "data" JSONB NOT NULL,
+    "is_closed" BOOLEAN NOT NULL DEFAULT FALSE,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "owner" TEXT
+);
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_all_types"."enumstateaccount" (
+    "pubkey" TEXT PRIMARY KEY,
+    "slot_updated" BIGINT NOT NULL,
+    "write_version" BIGINT NOT NULL DEFAULT 0,
+    "lamports" BIGINT NOT NULL,
+    "data" JSONB NOT NULL,
+    "is_closed" BOOLEAN NOT NULL DEFAULT FALSE,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_all_types"."_instructions" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "signature" TEXT NOT NULL,
+    "slot" BIGINT NOT NULL,
+    "block_time" BIGINT,
+    "instruction_name" TEXT NOT NULL,
+    "instruction_index" SMALLINT NOT NULL,
+    "inner_index" SMALLINT,
+    "args" JSONB NOT NULL,
+    "accounts" JSONB NOT NULL,
+    "data" JSONB NOT NULL,
+    "is_inner_ix" BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "uq__instructions_sig_idx" ON "test_snapshot_all_types"."_instructions" ("signature", "instruction_index", COALESCE("inner_index", -1));
+
+CREATE INDEX IF NOT EXISTS "idx_allprimitivesaccount_slot_updated" ON "test_snapshot_all_types"."allprimitivesaccount" ("slot_updated");
+
+CREATE INDEX IF NOT EXISTS "gin_allprimitivesaccount_data" ON "test_snapshot_all_types"."allprimitivesaccount" USING gin ("data" jsonb_path_ops);
+
+CREATE INDEX IF NOT EXISTS "idx_nestedstructaccount_slot_updated" ON "test_snapshot_all_types"."nestedstructaccount" ("slot_updated");
+
+CREATE INDEX IF NOT EXISTS "gin_nestedstructaccount_data" ON "test_snapshot_all_types"."nestedstructaccount" USING gin ("data" jsonb_path_ops);
+
+CREATE INDEX IF NOT EXISTS "idx_enumstateaccount_slot_updated" ON "test_snapshot_all_types"."enumstateaccount" ("slot_updated");
+
+CREATE INDEX IF NOT EXISTS "gin_enumstateaccount_data" ON "test_snapshot_all_types"."enumstateaccount" USING gin ("data" jsonb_path_ops);
+
+CREATE INDEX IF NOT EXISTS "idx__instructions_slot" ON "test_snapshot_all_types"."_instructions" ("slot");
+
+CREATE INDEX IF NOT EXISTS "idx__instructions_signature" ON "test_snapshot_all_types"."_instructions" ("signature");
+
+CREATE INDEX IF NOT EXISTS "idx__instructions_instruction_name" ON "test_snapshot_all_types"."_instructions" ("instruction_name");
+
+CREATE INDEX IF NOT EXISTS "idx__instructions_block_time" ON "test_snapshot_all_types"."_instructions" ("block_time");
+
+CREATE INDEX IF NOT EXISTS "gin__instructions_data" ON "test_snapshot_all_types"."_instructions" USING gin ("data" jsonb_path_ops);
+
+CREATE INDEX IF NOT EXISTS "gin__instructions_args" ON "test_snapshot_all_types"."_instructions" USING gin ("args" jsonb_path_ops);

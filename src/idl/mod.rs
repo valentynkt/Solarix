@@ -472,6 +472,40 @@ mod tests {
         assert_eq!(IdlSource::Manual.as_str(), "manual");
     }
 
+    // -----------------------------------------------------------------------
+    // Send-safety compile-time checks (Story 6.4 AC9)
+    //
+    // WHY: The project had a recurring `!Send` regression class during Sprint
+    // 3 / 4 where an `&mut self` state machine composed with sqlx transactions
+    // or RwLock write guards would silently fail Send inference in a composed
+    // async state machine. The root-cause lessons are in:
+    //
+    //   - `_bmad-output/problem-solution-2026-04-06.md`
+    //   - MEMORY.md "async Rust + sqlx `!Send` pattern"
+    //   - MEMORY.md "cfg(test) not type-checked when crate has errors"
+    //
+    // PATTERN: Use `fn _check(...) { _require_send(&fut); }` + `let _: fn(...) = _check;`
+    // (the fn-pointer cast forces monomorphization of `_check` regardless of
+    // test body execution — the `&dyn Send` trick inside the `#[test]` body
+    // is NOT safe because rustc can skip an uncompiled test body when the
+    // surrounding crate has errors).
+    //
+    // VERIFICATION PROCEDURE (one-time; re-run if the pattern ever gets
+    // refactored): introduce a `std::cell::Cell<u32>` into one of the target
+    // futures' signatures, run `cargo check --lib`, confirm the build fails.
+    // If it does NOT fail, the pattern is wrong and this test is doing nothing.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_idl_future_is_send() {
+        fn _check(manager: &mut IdlManager, pid: &str) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = manager.get_idl(pid);
+            _require_send(&fut);
+        }
+        let _: fn(&mut IdlManager, &str) = _check;
+    }
+
     #[test]
     fn cached_program_ids_returns_inserted_keys() {
         let mut manager = IdlManager::new("http://localhost:8899".to_string());

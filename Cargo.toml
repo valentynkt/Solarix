@@ -57,6 +57,13 @@ http-body-util = "0.1"
 proptest = "1"
 axum-test = "16"
 tokio = { version = "1", features = ["test-util"] }
+insta = "1"
+
+[features]
+# Enables tests that require external services (e.g. PostgreSQL via testcontainers).
+# Test files behind this feature are #[ignore]'d by default and are wired into a
+# real harness in Story 6.5.
+integration = []
 
 [lints.rust]
 unsafe_code = "forbid"

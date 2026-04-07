@@ -1,0 +1,60 @@
+---
+source: tests/schema_snapshots.rs
+expression: joined
+---
+CREATE SCHEMA IF NOT EXISTS "test_snapshot_simple_v030";
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_simple_v030"."_metadata" (
+    "key" TEXT PRIMARY KEY,
+    "value" JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_simple_v030"."_checkpoints" (
+    "stream" TEXT PRIMARY KEY,
+    "last_slot" BIGINT,
+    "last_signature" VARCHAR(88),
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_simple_v030"."dataaccount" (
+    "pubkey" TEXT PRIMARY KEY,
+    "slot_updated" BIGINT NOT NULL,
+    "write_version" BIGINT NOT NULL DEFAULT 0,
+    "lamports" BIGINT NOT NULL,
+    "data" JSONB NOT NULL,
+    "is_closed" BOOLEAN NOT NULL DEFAULT FALSE,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "value" BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS "test_snapshot_simple_v030"."_instructions" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "signature" TEXT NOT NULL,
+    "slot" BIGINT NOT NULL,
+    "block_time" BIGINT,
+    "instruction_name" TEXT NOT NULL,
+    "instruction_index" SMALLINT NOT NULL,
+    "inner_index" SMALLINT,
+    "args" JSONB NOT NULL,
+    "accounts" JSONB NOT NULL,
+    "data" JSONB NOT NULL,
+    "is_inner_ix" BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "uq__instructions_sig_idx" ON "test_snapshot_simple_v030"."_instructions" ("signature", "instruction_index", COALESCE("inner_index", -1));
+
+CREATE INDEX IF NOT EXISTS "idx_dataaccount_slot_updated" ON "test_snapshot_simple_v030"."dataaccount" ("slot_updated");
+
+CREATE INDEX IF NOT EXISTS "gin_dataaccount_data" ON "test_snapshot_simple_v030"."dataaccount" USING gin ("data" jsonb_path_ops);
+
+CREATE INDEX IF NOT EXISTS "idx__instructions_slot" ON "test_snapshot_simple_v030"."_instructions" ("slot");
+
+CREATE INDEX IF NOT EXISTS "idx__instructions_signature" ON "test_snapshot_simple_v030"."_instructions" ("signature");
+
+CREATE INDEX IF NOT EXISTS "idx__instructions_instruction_name" ON "test_snapshot_simple_v030"."_instructions" ("instruction_name");
+
+CREATE INDEX IF NOT EXISTS "idx__instructions_block_time" ON "test_snapshot_simple_v030"."_instructions" ("block_time");
+
+CREATE INDEX IF NOT EXISTS "gin__instructions_data" ON "test_snapshot_simple_v030"."_instructions" USING gin ("data" jsonb_path_ops);
+
+CREATE INDEX IF NOT EXISTS "gin__instructions_args" ON "test_snapshot_simple_v030"."_instructions" USING gin ("args" jsonb_path_ops);

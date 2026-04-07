@@ -359,3 +359,33 @@ impl ProgramRegistry {
         self.idl_manager.cached_program_ids()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Send-safety compile-time checks (Story 6.4 AC9)
+    //
+    // See `src/idl/mod.rs` test module doc comment for rationale and
+    // verification procedure. Short version: the `fn _check` + `let _: fn = _check;`
+    // pattern forces monomorphization so the Send bound is checked even when
+    // `cargo check --lib` would otherwise skip the test body.
+    //
+    // This module specifically pins `ProgramRegistry::commit_registration`
+    // because it was the exact root-cause function in the Sprint-3 !Send
+    // blocker (`_bmad-output/problem-solution-2026-04-06.md`). The
+    // commit_registration future must be `'static + Send` so it can be
+    // awaited from inside an axum handler spawned on a multi-thread runtime.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_commit_registration_future_is_send() {
+        fn _check(pool: PgPool, data: RegistrationData) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = ProgramRegistry::commit_registration(pool, data);
+            _require_send(&fut);
+        }
+        let _: fn(PgPool, RegistrationData) = _check;
+    }
+}

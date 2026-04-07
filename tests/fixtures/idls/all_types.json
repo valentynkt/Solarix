@@ -1,0 +1,200 @@
+{
+  "address": "AllTyPeS11111111111111111111111111111111111",
+  "metadata": {
+    "name": "all_types_test_program",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Fixture IDL exercising every supported Borsh type variant and every schema-generator column-promotion branch. Used by Story 6-4 (core module tests)."
+  },
+  "instructions": [
+    {
+      "name": "init_all_primitives",
+      "discriminator": [0, 0, 0, 0, 0, 0, 0, 1],
+      "accounts": [],
+      "args": [
+        { "name": "a_bool", "type": "bool" },
+        { "name": "a_u8", "type": "u8" },
+        { "name": "a_i8", "type": "i8" },
+        { "name": "a_u16", "type": "u16" },
+        { "name": "a_i16", "type": "i16" },
+        { "name": "a_u32", "type": "u32" },
+        { "name": "a_i32", "type": "i32" },
+        { "name": "a_u64", "type": "u64" },
+        { "name": "a_i64", "type": "i64" },
+        { "name": "a_f32", "type": "f32" },
+        { "name": "a_f64", "type": "f64" },
+        { "name": "a_u128", "type": "u128" },
+        { "name": "a_i128", "type": "i128" },
+        { "name": "a_string", "type": "string" },
+        { "name": "a_pubkey", "type": "pubkey" },
+        { "name": "a_bytes", "type": "bytes" }
+      ]
+    },
+    {
+      "name": "init_containers",
+      "discriminator": [0, 0, 0, 0, 0, 0, 0, 2],
+      "accounts": [],
+      "args": [
+        { "name": "opt_u64", "type": { "option": "u64" } },
+        { "name": "opt_pubkey", "type": { "option": "pubkey" } },
+        { "name": "vec_u8", "type": { "vec": "u8" } },
+        { "name": "vec_u64", "type": { "vec": "u64" } },
+        { "name": "vec_string", "type": { "vec": "string" } },
+        { "name": "arr_u8_32", "type": { "array": ["u8", 32] } },
+        { "name": "arr_u64_4", "type": { "array": ["u64", 4] } }
+      ]
+    },
+    {
+      "name": "init_nested",
+      "discriminator": [0, 0, 0, 0, 0, 0, 0, 3],
+      "accounts": [],
+      "args": [
+        { "name": "simple", "type": { "defined": { "name": "SimpleStruct" } } },
+        { "name": "nested", "type": { "defined": { "name": "NestedStruct" } } },
+        { "name": "flagged", "type": { "defined": { "name": "Status" } } },
+        { "name": "tagged", "type": { "defined": { "name": "Action" } } },
+        {
+          "name": "maybe_pubkey",
+          "type": {
+            "defined": {
+              "name": "COption",
+              "generics": [{ "kind": "type", "type": "pubkey" }]
+            }
+          }
+        },
+        { "name": "aliased", "type": { "defined": { "name": "Amount" } } }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "AllPrimitivesAccount",
+      "discriminator": [1, 0, 0, 0, 0, 0, 0, 1]
+    },
+    {
+      "name": "NestedStructAccount",
+      "discriminator": [1, 0, 0, 0, 0, 0, 0, 2]
+    },
+    { "name": "EnumStateAccount", "discriminator": [1, 0, 0, 0, 0, 0, 0, 3] }
+  ],
+  "types": [
+    {
+      "name": "SimpleStruct",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "x", "type": "u64" },
+          { "name": "y", "type": "i64" },
+          { "name": "label", "type": "string" }
+        ]
+      }
+    },
+    {
+      "name": "NestedStruct",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "inner",
+            "type": { "defined": { "name": "SimpleStruct" } }
+          },
+          { "name": "flag", "type": "bool" },
+          { "name": "tag", "type": { "defined": { "name": "Status" } } },
+          {
+            "name": "maybe",
+            "type": { "option": { "defined": { "name": "SimpleStruct" } } }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Status",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          { "name": "Pending" },
+          { "name": "Active" },
+          { "name": "Failed", "fields": [{ "name": "code", "type": "u32" }] },
+          { "name": "Frozen", "fields": ["u64", "string"] }
+        ]
+      }
+    },
+    {
+      "name": "Action",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          { "name": "Noop" },
+          {
+            "name": "Transfer",
+            "fields": [
+              { "name": "amount", "type": "u64" },
+              { "name": "to", "type": "pubkey" }
+            ]
+          },
+          {
+            "name": "Batch",
+            "fields": [{ "vec": { "defined": { "name": "SimpleStruct" } } }]
+          }
+        ]
+      }
+    },
+    {
+      "name": "Amount",
+      "type": {
+        "kind": "type",
+        "alias": "u64"
+      }
+    },
+    {
+      "name": "AllPrimitivesAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "authority", "type": "pubkey" },
+          { "name": "counter", "type": "u64" },
+          { "name": "small_flag", "type": "bool" },
+          { "name": "tiny_u", "type": "u8" },
+          { "name": "tiny_i", "type": "i8" },
+          { "name": "medium_u", "type": "u32" },
+          { "name": "medium_i", "type": "i32" },
+          { "name": "float32", "type": "f32" },
+          { "name": "float64", "type": "f64" },
+          { "name": "huge_unsigned", "type": "u128" },
+          { "name": "huge_signed", "type": "i128" },
+          { "name": "label", "type": "string" },
+          { "name": "blob", "type": "bytes" },
+          { "name": "fixed_key", "type": { "array": ["u8", 32] } },
+          { "name": "trailing_opt", "type": { "option": "u64" } }
+        ]
+      }
+    },
+    {
+      "name": "NestedStructAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "owner", "type": "pubkey" },
+          {
+            "name": "payload",
+            "type": { "defined": { "name": "NestedStruct" } }
+          },
+          {
+            "name": "history",
+            "type": { "vec": { "defined": { "name": "SimpleStruct" } } }
+          }
+        ]
+      }
+    },
+    {
+      "name": "EnumStateAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "state", "type": { "defined": { "name": "Status" } } },
+          { "name": "last_action", "type": { "defined": { "name": "Action" } } }
+        ]
+      }
+    }
+  ]
+}

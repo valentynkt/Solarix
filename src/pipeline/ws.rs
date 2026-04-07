@@ -788,11 +788,43 @@ mod tests {
         );
     }
 
-    // -- Send safety --
+    // -----------------------------------------------------------------------
+    // Send-safety compile-time checks (Story 6.4 AC9)
+    //
+    // See `src/idl/mod.rs` test module doc comment for rationale and
+    // verification procedure. Short version: `fn _check` + `let _: fn = _check;`
+    // forces monomorphization so the `T: Send` bound is actually checked.
+    //
+    // NOTE: `TransactionStream::{next, subscribe}` are `async_trait`-wrapped,
+    // which emits `Pin<Box<dyn Future + Send + '_>>` internally — so these
+    // tests mostly pin the macro contract in place. If someone switches the
+    // trait to `#[async_trait(?Send)]`, the test will fail to compile, which
+    // is exactly the regression we want to catch.
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_ws_transaction_stream_is_send() {
         fn _assert_send<T: Send>() {}
         _assert_send::<WsTransactionStream>();
+    }
+
+    #[test]
+    fn test_ws_next_future_is_send() {
+        fn _check(s: &mut WsTransactionStream) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = s.next();
+            _require_send(&fut);
+        }
+        let _: fn(&mut WsTransactionStream) = _check;
+    }
+
+    #[test]
+    fn test_ws_subscribe_future_is_send() {
+        fn _check(s: &mut WsTransactionStream) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = s.subscribe("prog");
+            _require_send(&fut);
+        }
+        let _: fn(&mut WsTransactionStream) = _check;
     }
 }
