@@ -20,12 +20,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgres://solarix:solarix@postgres:5432/solarix
       SOLANA_RPC_URL: "${SOLANA_RPC_URL:-https://api.devnet.solana.com}"
       SOLARIX_API_HOST: "0.0.0.0"
-      SOLARIX_API_PORT: "3000"
-      SOLARIX_LOG_FORMAT: "pretty"
+      SOLARIX_API_PORT: "${SOLARIX_API_PORT:-3000}"
+      SOLARIX_RPC_RPS: "${SOLARIX_RPC_RPS:-10}"
+      SOLARIX_LOG_FORMAT: "${SOLARIX_LOG_FORMAT:-json}"
+      SOLARIX_LOG_LEVEL: "${SOLARIX_LOG_LEVEL:-info}"
     ports:
       - "3000:3000"
     healthcheck:
