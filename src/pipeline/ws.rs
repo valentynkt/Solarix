@@ -190,6 +190,11 @@ pub struct WsTransactionStream {
     /// response arrived. Drained by `next()` so handshake-ordering races
     /// never drop data.
     pending_frames: VecDeque<String>,
+    /// Target program for the active subscription. Set in `subscribe()`,
+    /// threaded into `parse_logs_notification` so malformed-frame and
+    /// oversized-signature warnings can be attributed to the correct
+    /// program during multi-program orchestration. Story 6.1 AC7 R1.
+    program_id: Option<String>,
 }
 
 impl WsTransactionStream {
@@ -213,6 +218,7 @@ impl WsTransactionStream {
             pending_ping: false,
             last_ping_time: now,
             pending_frames: VecDeque::new(),
+            program_id: None,
         }
     }
 
@@ -369,6 +375,10 @@ impl TransactionStream for WsTransactionStream {
 
         info!(ws_url = %self.ws_url, program_id, "connecting to WebSocket");
 
+        // Record the target program so `parse_logs_notification` warnings
+        // carry `program_id` for multi-program log attribution.
+        self.program_id = Some(program_id.to_string());
+
         // Whole handshake (connect + subscribe + read response) shares a
         // single budget. Protects against stalled DNS, TLS handshake
         // blackholes, and servers that accept the connection but never reply.
@@ -395,10 +405,20 @@ impl TransactionStream for WsTransactionStream {
 
     #[tracing::instrument(name = "ws.next", skip(self), level = "debug", err(Display))]
     async fn next(&mut self) -> Result<Option<StreamEvent>, PipelineError> {
+        // Clone once per loop entry so the `&mut self.dedup` + `&mut
+        // self.last_seen_slot` borrows inside `parse_logs_notification` do
+        // not conflict with an immutable borrow of `self.program_id`.
+        let program_id_owned = self.program_id.clone();
+        let program_id_ref = program_id_owned.as_deref();
         loop {
             // Replay any frames buffered during `subscribe()` first.
             if let Some(text) = self.pending_frames.pop_front() {
-                match parse_logs_notification(&text, &mut self.dedup, &mut self.last_seen_slot)? {
+                match parse_logs_notification(
+                    &text,
+                    &mut self.dedup,
+                    &mut self.last_seen_slot,
+                    program_id_ref,
+                )? {
                     Some(event) => return Ok(Some(event)),
                     None => continue,
                 }
@@ -431,6 +451,7 @@ impl TransactionStream for WsTransactionStream {
                             &text,
                             &mut self.dedup,
                             &mut self.last_seen_slot,
+                            program_id_ref,
                         )? {
                             Some(event) => return Ok(Some(event)),
                             None => continue,
@@ -556,11 +577,18 @@ fn derive_ws_url(rpc_url: &str) -> String {
 ///   should be silently skipped
 /// - `Err(...)` on a server-pushed JSON-RPC error (propagated so the pipeline
 ///   can reconnect instead of silently ignoring a killed subscription)
+///
+/// `program_id` is the target program for the active subscription. It is
+/// optional only because tests construct the parser without a subscription
+/// context — production callers always pass `Some(...)`. Story 6.1 AC7 R1
+/// requires every `warn!` in this function to carry `program_id`.
 fn parse_logs_notification(
     text: &str,
     dedup: &mut DeduplicationSet,
     last_seen_slot: &mut Option<u64>,
+    program_id: Option<&str>,
 ) -> Result<Option<StreamEvent>, PipelineError> {
+    let program_id_field = program_id.unwrap_or("");
     // Try generic envelope first to catch server-pushed errors.
     if let Ok(envelope) = serde_json::from_str::<WsJsonRpcEnvelope>(text) {
         if let Some(error) = envelope.error {
@@ -571,7 +599,11 @@ fn parse_logs_notification(
         }
         // If it's neither a notification nor carries useful data, skip.
         if envelope.method.as_deref() != Some("logsNotification") {
-            debug!(text_preview = %preview(text), "non-notification WS message, skipping");
+            debug!(
+                program_id = program_id_field,
+                text_preview = %preview(text),
+                "non-notification WS message, skipping"
+            );
             return Ok(None);
         }
     }
@@ -579,7 +611,11 @@ fn parse_logs_notification(
     let notification: LogsNotification = match serde_json::from_str(text) {
         Ok(n) => n,
         Err(_) => {
-            warn!(text_preview = %preview(text), "malformed logsNotification, skipping");
+            warn!(
+                program_id = program_id_field,
+                text_preview = %preview(text),
+                "malformed logsNotification, skipping"
+            );
             return Ok(None);
         }
     };
@@ -592,6 +628,7 @@ fn parse_logs_notification(
     // absurdly long value is either corruption or a malicious payload.
     if sig.len() > MAX_SIGNATURE_LEN {
         warn!(
+            program_id = program_id_field,
             sig_len = sig.len(),
             "signature exceeds max length, skipping"
         );
@@ -745,7 +782,7 @@ mod tests {
                 "subscription":1
             }
         }"#;
-        let ev = parse_logs_notification(frame, &mut dedup, &mut last_slot)
+        let ev = parse_logs_notification(frame, &mut dedup, &mut last_slot, Some("TestProg11"))
             .expect("should parse")
             .expect("should yield event");
         assert_eq!(ev.signature, "sigA");
@@ -759,7 +796,7 @@ mod tests {
         let mut last_slot = None;
         let frame =
             r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"subscription cancelled"}}"#;
-        let err = parse_logs_notification(frame, &mut dedup, &mut last_slot)
+        let err = parse_logs_notification(frame, &mut dedup, &mut last_slot, Some("TestProg11"))
             .expect_err("server error should propagate");
         assert!(matches!(err, PipelineError::WebSocketDisconnect(_)));
     }
@@ -782,8 +819,9 @@ mod tests {
                 }}
             }}"#
         );
-        let result = parse_logs_notification(&frame, &mut dedup, &mut last_slot)
-            .expect("parse should succeed");
+        let result =
+            parse_logs_notification(&frame, &mut dedup, &mut last_slot, Some("TestProg11"))
+                .expect("parse should succeed");
         assert!(result.is_none(), "oversized sig should be skipped");
         assert_eq!(dedup.len(), 0);
     }
@@ -794,14 +832,15 @@ mod tests {
         let mut last_slot = None;
 
         let frame1 = r#"{"jsonrpc":"2.0","method":"logsNotification","params":{"result":{"context":{"slot":100},"value":{"signature":"sigX","err":null,"logs":[]}},"subscription":1}}"#;
-        parse_logs_notification(frame1, &mut dedup, &mut last_slot)
+        parse_logs_notification(frame1, &mut dedup, &mut last_slot, Some("TestProg11"))
             .expect("first parse should succeed");
         assert_eq!(last_slot, Some(100));
 
         // Same sig, later slot — should still advance the slot cursor
         let frame2 = r#"{"jsonrpc":"2.0","method":"logsNotification","params":{"result":{"context":{"slot":200},"value":{"signature":"sigX","err":null,"logs":[]}},"subscription":1}}"#;
-        let result = parse_logs_notification(frame2, &mut dedup, &mut last_slot)
-            .expect("second parse should succeed");
+        let result =
+            parse_logs_notification(frame2, &mut dedup, &mut last_slot, Some("TestProg11"))
+                .expect("second parse should succeed");
         assert!(result.is_none(), "duplicate sig should be skipped");
         assert_eq!(
             last_slot,

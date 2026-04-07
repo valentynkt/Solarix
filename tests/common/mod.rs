@@ -14,5 +14,8 @@
 pub mod decoder_fixtures;
 pub mod known_programs;
 
-#[cfg(feature = "integration")]
+// `tests/common/postgres.rs` carries `#![cfg(feature = "integration")]` at
+// the top of the file itself, so a redundant `#[cfg(...)]` here would trip
+// `clippy::duplicated_attributes`. The bare `pub mod` declaration is enough
+// — the file-level cfg gates the contents.
 pub mod postgres;

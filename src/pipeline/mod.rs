@@ -1516,6 +1516,7 @@ fn enrich_instruction(
             let key = account_keys.get(idx as usize).cloned();
             if key.is_none() {
                 warn!(
+                    program_id,
                     idx,
                     account_keys_len = account_keys.len(),
                     "OOB account index in instruction"
@@ -2509,7 +2510,7 @@ mod tests {
                 let mut guard = self
                     .0
                     .lock()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
                 guard.extend_from_slice(buf);
                 Ok(buf.len())
             }

@@ -6,6 +6,7 @@ get a PR through the Solarix CI gate on the first try.
 ## Table of Contents
 
 - [Local CI reproduction](#local-ci-reproduction)
+- [Integration tests](#integration-tests)
 - [Import ordering convention](#import-ordering-convention)
 - [Filing a CI failure](#filing-a-ci-failure)
 
@@ -18,7 +19,7 @@ in the pipeline has a local-cargo equivalent so you can verify before pushing.
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lint`             | `cargo fmt -- --check && cargo clippy --release --all-targets -- -D warnings`                                                                       |
 | `unit`             | `cargo test --release --lib`                                                                                                                        |
-| `integration`      | `cargo test --release --tests` (or `cargo test --release --tests --features integration` after Story 6.5 ships the harness)                         |
+| `integration`      | `cargo test --release --tests --features integration` (Story 6.5 harness — see [Integration tests](#integration-tests) below)                       |
 | `coverage`         | `cargo llvm-cov --release --lib --summary-only`                                                                                                     |
 | `fuzz-smoke`       | `cargo +nightly fuzz run decode_instruction -- -max_total_time=60` (requires Story 6.4 fuzz target)                                                 |
 | `security`         | `cargo audit && cargo deny check advisories bans sources && gitleaks detect --source . --config .gitleaks.toml`                                     |
@@ -57,6 +58,55 @@ The repository pins MSRV via `rust-toolchain.toml`. When you `cd` into the repo
 your `cargo` will use that channel automatically. If you want to test against
 stable or beta (matching the `toolchain-matrix` job), use `cargo +stable` /
 `cargo +beta` explicitly or set `RUSTUP_TOOLCHAIN=stable`.
+
+## Integration tests
+
+Solarix's integration tests boot real `postgres:16-alpine` containers via
+[testcontainers-modules](https://crates.io/crates/testcontainers-modules) and
+exercise the writer, schema generator, decoder, registration path, and filter
+SQL builder against the live PostgreSQL catalog. They are gated behind the
+`integration` cargo feature so the default `cargo test` stays fast and
+docker-free.
+
+**Local run:**
+
+```bash
+cargo test --release --tests --features integration
+```
+
+Requirements:
+
+- Docker Desktop or docker engine running locally (the harness spawns one
+  ephemeral container per test, ~2-3 s warm cache).
+- The MSRV toolchain (1.88) — see the [Required tools](#required-tools)
+  section.
+
+The canonical pool fixture lives at `tests/common/postgres.rs::with_postgres`
+and `with_postgres_returning`. New integration tests should reuse it instead
+of rolling their own connection setup. The harness:
+
+- Spawns a fresh container per call (per-test isolation, parallelism-safe).
+- Calls `solarix::storage::bootstrap_system_tables` so every closure starts
+  on a clean, bootstrapped DB.
+- Drops the container automatically when the closure returns or panics.
+
+The non-mainnet integration suite is budgeted to run end-to-end in **under
+90 seconds** on a developer laptop with the docker image cached.
+
+**Mainnet smoke test (nightly-only):**
+
+`tests/mainnet_smoke.rs` is gated behind the separate `mainnet-smoke` feature
+(declared in `Cargo.toml` as `mainnet-smoke = ["integration"]` so it pulls
+in the testcontainers harness transitively). It is run only by
+`.github/workflows/nightly.yml` against `https://api.mainnet-beta.solana.com`,
+not by per-PR CI. Local invocation:
+
+```bash
+cargo test --release --features mainnet-smoke -- mainnet_smoke
+```
+
+The nightly workflow uses `continue-on-error: true` and posts a PR comment
+on failure rather than turning the cron red.
 
 ## Import ordering convention
 

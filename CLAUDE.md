@@ -181,6 +181,7 @@ max_width = 100
 - `proptest` for decoder roundtrip verification (Borsh serialize -> decode -> assert JSON)
 - `litesvm` for pipeline integration (deploy program, send txs, verify indexed data)
 - `axum-test` for API endpoint testing
+- New integration tests **must** reuse `tests/common/postgres.rs::with_postgres` as the canonical pool fixture instead of rolling their own setup. The harness spawns a per-test `postgres:16-alpine` testcontainer, calls `bootstrap_system_tables`, and tears the container down on return or panic. Gate test files behind `#![cfg(feature = "integration")]`.
 
 ### Tracing
 
