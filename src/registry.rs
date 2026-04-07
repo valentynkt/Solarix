@@ -143,6 +143,10 @@ impl ProgramRegistry {
             was_cached: _,
         } = data;
 
+        // Serialize IDL to JSON for persistence (enables pipeline auto-start on restart)
+        let idl_json_string = serde_json::to_string(&idl)
+            .map_err(|e| RegistrationError::DatabaseError(format!("idl serialize failed: {e}")))?;
+
         Self::write_registration(
             pool.clone(),
             program_id.clone(),
@@ -150,6 +154,7 @@ impl ProgramRegistry {
             schema_name.clone(),
             idl_hash.clone(),
             idl_source.clone(),
+            idl_json_string,
         )
         .await?;
 
@@ -295,6 +300,7 @@ impl ProgramRegistry {
         schema_name: String,
         idl_hash: String,
         idl_source: String,
+        idl_json: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), RegistrationError>> + Send>> {
         Box::pin(async move {
             let mut tx = pool
@@ -303,8 +309,8 @@ impl ProgramRegistry {
                 .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
 
             let result = sqlx::query(
-                r#"INSERT INTO "programs" ("program_id", "program_name", "schema_name", "idl_hash", "idl_source", "status")
-                   VALUES ($1, $2, $3, $4, $5, 'registered')
+                r#"INSERT INTO "programs" ("program_id", "program_name", "schema_name", "idl_hash", "idl_source", "idl_json", "status")
+                   VALUES ($1, $2, $3, $4, $5, $6, 'registered')
                    ON CONFLICT ("program_id") DO NOTHING"#,
             )
             .bind(&program_id)
@@ -312,6 +318,7 @@ impl ProgramRegistry {
             .bind(&schema_name)
             .bind(&idl_hash)
             .bind(&idl_source)
+            .bind(&idl_json)
             .execute(tx.as_mut())
             .await
             .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;

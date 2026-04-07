@@ -70,6 +70,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = ProgramRegistry::new(idl_manager);
     let registry = Arc::new(RwLock::new(registry));
 
+    // Check for registered programs to auto-start pipeline
+    let programs = query_registered_programs(&pool).await;
+
+    // Seed the registry's IDL cache with persisted IDLs so API queries work
+    {
+        let mut reg = registry.write().await;
+        for p in &programs {
+            let idl_json = match serde_json::to_string(&p.idl) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(program_id = %p.program_id, error = %e, "failed to serialize loaded IDL for cache seeding");
+                    continue;
+                }
+            };
+            if let Err(e) = reg.idl_manager.insert_fetched_idl(
+                &p.program_id,
+                &idl_json,
+                solarix::idl::IdlSource::OnChain,
+            ) {
+                warn!(program_id = %p.program_id, error = %e, "failed to seed registry cache");
+            }
+        }
+    }
+
     let addr = format!("{}:{}", config.api_host, config.api_port);
 
     let state = Arc::new(solarix::api::AppState {
@@ -85,9 +109,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     info!(addr = %addr, "listening");
-
-    // Check for registered programs to auto-start pipeline
-    let programs = query_registered_programs(&pool).await;
 
     let exit_code = if programs.is_empty() {
         info!("no registered programs with IDL, running API server only");
@@ -107,6 +128,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         // Pipeline mode: run API + pipeline concurrently
+        // Currently only the first program's pipeline runs. Multi-program concurrent
+        // indexing is tracked as deferred work — see deferred-work.md.
+        if programs.len() > 1 {
+            warn!(
+                count = programs.len(),
+                first_program = %programs[0].program_id,
+                "multiple programs registered; only the first will be indexed in this version"
+            );
+        }
         let program = &programs[0];
         info!(
             program_id = %program.program_id,
@@ -196,14 +226,14 @@ struct StartupProgram {
     idl: anchor_lang_idl_spec::Idl,
 }
 
-/// Query the programs table for programs with complete registration and cached IDL.
+/// Query the programs table for programs with persisted IDL JSON.
 ///
-/// Since IDLs are stored in-memory only (not persisted to DB), this function
-/// tries to re-fetch IDLs from on-chain for programs with `schema_created` status.
-/// Programs whose IDL cannot be re-fetched are skipped.
+/// Returns programs with `status = 'schema_created'` and a non-null `idl_json` column,
+/// parsing the IDL JSON into the `Idl` type for pipeline use.
 async fn query_registered_programs(pool: &PgPool) -> Vec<StartupProgram> {
-    let rows = match sqlx::query_as::<_, (String, String)>(
-        r#"SELECT "program_id", "schema_name" FROM "programs" WHERE "status" = 'schema_created'"#,
+    let rows = match sqlx::query_as::<_, (String, String, Option<String>)>(
+        r#"SELECT "program_id", "schema_name", "idl_json" FROM "programs"
+           WHERE "status" = 'schema_created'"#,
     )
     .fetch_all(pool)
     .await
@@ -221,18 +251,27 @@ async fn query_registered_programs(pool: &PgPool) -> Vec<StartupProgram> {
 
     info!(count = rows.len(), "found registered programs in DB");
 
-    // For now, IDLs are not persisted to DB. To auto-start the pipeline,
-    // we would need to re-fetch IDLs from on-chain. This is deferred —
-    // users should re-register programs after restart until IDL persistence
-    // is added.
-    //
-    // TODO: Add idl_json column to programs table for IDL persistence,
-    // then parse and return here.
-    warn!(
-        "IDL persistence not yet implemented — pipeline auto-start requires re-registration. \
-         Register programs via POST /api/programs to start indexing."
-    );
-    Vec::new()
+    let mut programs = Vec::new();
+    for (program_id, schema_name, idl_json) in rows {
+        let Some(json) = idl_json else {
+            warn!(program_id = %program_id, "program has no persisted idl_json, skipping pipeline auto-start");
+            continue;
+        };
+        match serde_json::from_str::<anchor_lang_idl_spec::Idl>(&json) {
+            Ok(idl) => {
+                info!(program_id = %program_id, schema_name = %schema_name, "loaded persisted IDL");
+                programs.push(StartupProgram {
+                    program_id,
+                    schema_name,
+                    idl,
+                });
+            }
+            Err(e) => {
+                warn!(program_id = %program_id, error = %e, "failed to parse persisted IDL JSON");
+            }
+        }
+    }
+    programs
 }
 
 /// Final shutdown sequence: update indexer_state and close pool.

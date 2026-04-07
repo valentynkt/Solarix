@@ -93,10 +93,14 @@ pub async fn bootstrap_system_tables(pool: &PgPool) -> Result<(), StorageError> 
             "schema_name"  TEXT NOT NULL UNIQUE,
             "idl_hash"     VARCHAR(64),
             "idl_source"   TEXT,
+            "idl_json"     TEXT,
             "status"       TEXT NOT NULL DEFAULT 'initializing',
             "created_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             "updated_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+
+        -- Idempotent column add for upgrades from older schema versions
+        ALTER TABLE "programs" ADD COLUMN IF NOT EXISTS "idl_json" TEXT;
 
         CREATE TABLE IF NOT EXISTS "indexer_state" (
             "program_id"          VARCHAR(44) PRIMARY KEY REFERENCES "programs"("program_id"),
