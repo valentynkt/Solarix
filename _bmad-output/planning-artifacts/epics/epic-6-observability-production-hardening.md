@@ -502,11 +502,25 @@ The original Epic 6 had four stories. The refined epic has **eleven**, grouped b
 **Then** it includes one test per bug fixed during the Sprint-4 e2e gate:
 
 1. `test_idl_address_derivation_matches_anchor_v030` (regression for the wrong PDA derivation)
-2. `test_idl_json_persisted_and_loaded_on_restart` (regression for the missing `idl_json` column)
+2. `test_idl_json_persisted_and_loaded_on_restart` (regression for the missing `idl_json` column — **gates Story 4.4 → done**, see below)
 3. `test_promoted_column_filter_with_bigint_value` (regression for `bigint > text`)
 4. `test_docker_compose_log_format_is_json_by_default` (regression for the hardcoded `pretty`)
 5. `test_env_example_documents_every_config_field` (regression for the stale `.env.example`)
 6. `test_invalid_program_id_returns_documented_status` (lock down the 400 vs 422 decision once made)
+
+**Test contract for `test_idl_json_persisted_and_loaded_on_restart`** _(carved from Story 4.4 Task 8 on 2026-04-07)_:
+
+The test must exercise the exact bug discovered during the Sprint-4 gate (Task 3 kill-restart sub-step) where `query_registered_programs` returned `Vec::new()` after a process restart. Steps:
+
+1. Spin up a fresh testcontainer Postgres via the 6.5 harness.
+2. Register a program through the API handler with the bundled fixture IDL (`tests/fixtures/idls/simple_v030.json`).
+3. Assert `programs.idl_json IS NOT NULL` for that row directly via SQL.
+4. Drop the in-memory `ProgramRegistry` and any pipeline orchestrator handles **without touching the DB**.
+5. Recreate the registry from the same pool, call `query_registered_programs(&pool).await`, and assert it returns exactly one `StartupProgram` with a parseable `Idl` and the correct `program_id` + `schema_name`.
+6. Seed the new registry's IDL cache from that result and assert `registry.get_idl(&program_id).await` returns `Some`.
+7. Negative coverage: insert a row with `idl_json = NULL` and a row with `idl_json = '{"not": "valid idl"}'`; assert both are skipped with a `warn!` and the loader continues with the valid row (locks AC3 + AC7 from Story 4.4).
+
+This test would have caught the original bug. It is the **gate for Story 4.4 → done**. If Epic 6 lands after Story 4.4, this test definition stays here and Story 4.4 is held in `review` until it lands. If Story 4.4 needs to ship sooner, the test can be inlined in `tests/integration_register_restart.rs` and migrated here later.
 
 **Cursor pagination invariant test**
 
