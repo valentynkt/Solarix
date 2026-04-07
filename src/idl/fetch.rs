@@ -27,9 +27,17 @@ pub async fn fetch_idl_from_chain(
             reason: format!("invalid program ID: {e}"),
         })?;
 
-    let (pda, _bump) = Pubkey::find_program_address(&[b"anchor:idl"], &program_pubkey);
-    let pda_base58 = pda.to_string();
-    debug!(program_id, pda = %pda_base58, "derived IDL PDA address");
+    // Anchor IDL account address derivation (matches anchor-lang v0.30 IdlAccount::address):
+    //   1. program_signer = find_program_address(&[], program_id).0
+    //   2. idl_address    = create_with_seed(&program_signer, "anchor:idl", program_id)
+    let (program_signer, _bump) = Pubkey::find_program_address(&[], &program_pubkey);
+    let idl_address = Pubkey::create_with_seed(&program_signer, "anchor:idl", &program_pubkey)
+        .map_err(|e| IdlError::FetchFailed {
+            program_id: program_id.to_string(),
+            reason: format!("failed to derive IDL address: {e}"),
+        })?;
+    let pda_base58 = idl_address.to_string();
+    debug!(program_id, idl_address = %pda_base58, "derived IDL account address");
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -211,16 +219,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pda_derivation_is_deterministic() {
+    fn idl_address_derivation_is_deterministic() {
         // Known program ID
         let program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
         let program_pubkey: Pubkey = program_id.parse().expect("valid pubkey");
-        let (pda1, bump1) = Pubkey::find_program_address(&[b"anchor:idl"], &program_pubkey);
-        let (pda2, bump2) = Pubkey::find_program_address(&[b"anchor:idl"], &program_pubkey);
-        assert_eq!(pda1, pda2);
-        assert_eq!(bump1, bump2);
-        // PDA should not be on the ed25519 curve (that's the point of PDAs)
-        assert_ne!(pda1.to_string(), program_id);
+
+        let derive = |pid: &Pubkey| -> Pubkey {
+            let (signer, _) = Pubkey::find_program_address(&[], pid);
+            Pubkey::create_with_seed(&signer, "anchor:idl", pid).expect("derive idl address")
+        };
+
+        let addr1 = derive(&program_pubkey);
+        let addr2 = derive(&program_pubkey);
+        assert_eq!(addr1, addr2);
+        // Address should differ from the program id itself
+        assert_ne!(addr1.to_string(), program_id);
     }
 
     #[test]

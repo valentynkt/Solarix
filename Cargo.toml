@@ -38,7 +38,7 @@ backon = "1"
 # Solana
 # chainparser = { git = "https://github.com/valentynkit/chainparser", branch = "solarix-v3" }
 anchor-lang-idl-spec = "0.1.0"
-solana-pubkey = { version = "2", features = ["curve25519"] }
+solana-pubkey = { version = "2", features = ["curve25519", "sha2"] }
 # solana-rpc-client-api = "3"
 # solana-pubsub-client = "3"
 # Async trait for object-safe trait boundaries
