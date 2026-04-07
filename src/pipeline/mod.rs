@@ -1741,10 +1741,19 @@ mod tests {
 
     #[test]
     fn test_backfill_progress_eta() {
+        // Freshly constructed: elapsed time < 1 ms → slots_per_sec() returns 0
+        // → eta() takes the early-return branch and yields Duration::from_secs(0).
+        // This pins the zero-rate sentinel; a regression that swaps the sentinel
+        // for `Duration::MAX` (or for a panic on division-by-zero) fails the
+        // assertion.
         let p = BackfillProgress::new(0, 1000);
-        // ETA is a Duration (non-negative by construction); just make sure the
-        // call path doesn't panic.
-        let _ = p.eta();
+        assert_eq!(p.eta(), Duration::from_secs(0));
+
+        // A progress where the start range is empty (start == end) means
+        // remaining slots is 0; ETA must still be Duration::ZERO regardless of
+        // rate to avoid an infinite ETA on a finished backfill.
+        let p_done = BackfillProgress::new(1000, 1000);
+        assert_eq!(p_done.eta(), Duration::from_secs(0));
     }
 
     // -- decode failure rate (uses is_high_failure_rate from decoder) --

@@ -29,11 +29,22 @@ impl IdlSource {
 }
 
 /// Cached IDL entry with metadata.
+///
+/// `raw_json` holds the **original fetched/uploaded JSON bytes** — not a
+/// re-serialization of `idl`. This is what `idl_hash` was computed from and
+/// what gets persisted into `programs.idl_json`. Holding the raw bytes is
+/// what gives story 4.4 AC5 (hash stability) its byte-exact guarantee:
+/// `compute_idl_hash(raw_json) == hash`. Re-serializing through
+/// `serde_json::to_string(&idl)` would silently drop fields not modeled by
+/// `anchor_lang_idl_spec::Idl` and shuffle `Option` `None`-vs-absent
+/// representations, breaking the round trip for any future feature that
+/// re-hashes persisted bytes (e.g., on-chain IDL drift detection).
 #[derive(Debug, Clone)]
 pub struct CachedIdl {
     pub idl: Idl,
     pub hash: String,
     pub source: IdlSource,
+    pub raw_json: String,
 }
 
 /// Owned parameters needed for async IDL fetch outside the lock.
@@ -130,7 +141,12 @@ impl IdlManager {
         let idl: Idl =
             serde_json::from_value(raw_value).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
 
-        let cached = CachedIdl { idl, hash, source };
+        let cached = CachedIdl {
+            idl,
+            hash,
+            source,
+            raw_json: idl_json,
+        };
         self.cache.insert(program_id.to_string(), cached);
 
         Ok(&self.cache[program_id].idl)
@@ -157,6 +173,10 @@ impl IdlManager {
     }
 
     /// Upload an IDL manually: validate, parse, cache with `Manual` source.
+    ///
+    /// The `idl_json` argument is stored verbatim in `CachedIdl::raw_json` to
+    /// preserve the byte-exact hash invariant (`compute_idl_hash(raw_json) == hash`).
+    /// Story 4.4 AC5.
     pub fn upload_idl(&mut self, program_id: &str, idl_json: &str) -> Result<&Idl, IdlError> {
         let raw_value: serde_json::Value =
             serde_json::from_str(idl_json).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
@@ -170,6 +190,7 @@ impl IdlManager {
             idl,
             hash,
             source: IdlSource::Manual,
+            raw_json: idl_json.to_string(),
         };
         self.cache.insert(program_id.to_string(), cached);
 
@@ -231,7 +252,11 @@ impl IdlManager {
 
     /// Insert a pre-fetched IDL into the cache (validate, parse, hash, cache).
     ///
-    /// Called under the write lock after `fetch_idl_standalone()` completes.
+    /// Called under the write lock after `fetch_idl_standalone()` completes,
+    /// or by the startup auto-start path with bytes loaded from
+    /// `programs.idl_json`. The `idl_json` argument is stored verbatim in
+    /// `CachedIdl::raw_json` to preserve the byte-exact hash invariant
+    /// (`compute_idl_hash(raw_json) == hash`). Story 4.4 AC5.
     pub fn insert_fetched_idl(
         &mut self,
         program_id: &str,
@@ -246,7 +271,12 @@ impl IdlManager {
         let idl: Idl =
             serde_json::from_value(raw_value).map_err(|e| IdlError::ParseFailed(e.to_string()))?;
 
-        let cached = CachedIdl { idl, hash, source };
+        let cached = CachedIdl {
+            idl,
+            hash,
+            source,
+            raw_json: idl_json.to_string(),
+        };
         self.cache.insert(program_id.to_string(), cached);
 
         Ok(&self.cache[program_id].idl)

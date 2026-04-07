@@ -1,15 +1,18 @@
 title = "Solarix gitleaks config"
 
+# Solarix's IDL fixtures and BMad planning artifacts contain Solana pubkeys
+# (base58, 32–44 chars) that look like secrets to gitleaks's default rules but
+# are public on-chain identifiers. We allowlist by PATH only — never globally
+# by regex — so a real secret pasted into any other file (including any .md
+# file outside the planning artifacts) is still caught.
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Solana pubkeys in fixtures and planning artifacts are not secrets"
-paths = [
-  '''tests/fixtures/.*''',
-  '''_bmad-output/.*''',
-  '''docs/research/.*''',
-  '''.*\.md$''',
-]
-# Base58 strings of 32–44 chars are Solana pubkeys, not secrets.
-regexes = ['''[1-9A-HJ-NP-Za-km-z]{32,44}''']
+description = "Solana pubkeys in test fixtures, planning artifacts, and research docs are public, not secrets"
+paths = ['''tests/fixtures/.*''', '''_bmad-output/.*''', '''docs/research/.*''']
+# NOTE: do NOT add a top-level `regexes = [...]` here. A regex at this level
+# applies to every detected secret across the whole repo, and a base58 pattern
+# of length 32–44 also matches the base58 encoding of many real secrets
+# (Stripe keys, GCP service-account fingerprints, ECDSA signatures). Scope
+# any regex allowlists under a specific [[rules]] block instead.

@@ -121,6 +121,124 @@ async fn register_program_creates_db_rows() {
 
 #[tokio::test]
 #[ignore] // requires running PostgreSQL
+async fn mark_program_error_transitions_status_and_records_message() {
+    // Story 4.4 Task 6 (refined P15): when registry IDL cache seeding fails
+    // for a program loaded from persistence, we drop it from the auto-start
+    // list AND flip `programs.status = 'error'` so the API stays consistent.
+    // This test exercises the helper that performs that transition.
+
+    let pool = setup_pool().await;
+    let program_id = "Testd1111111111111111111111111111111111111111";
+
+    cleanup(&pool, program_id).await;
+
+    // Seed a successful registration so the row + indexer_state row exist.
+    let idl_manager = IdlManager::new("http://localhost:8899".to_string());
+    let mut registry = ProgramRegistry::new(idl_manager);
+    let data = registry
+        .prepare_registration(program_id.to_string(), Some(sample_idl_json()))
+        .expect("prepare should succeed");
+    ProgramRegistry::commit_registration(pool.clone(), data)
+        .await
+        .expect("commit should succeed");
+
+    // Pre-condition: status should not be 'error' yet.
+    let pre_status: String =
+        sqlx::query_scalar(r#"SELECT "status" FROM "programs" WHERE "program_id" = $1"#)
+            .bind(program_id)
+            .fetch_one(&pool)
+            .await
+            .expect("programs row should exist");
+    assert_ne!(pre_status, "error");
+
+    // Apply the helper.
+    ProgramRegistry::mark_program_error(
+        pool.clone(),
+        program_id.to_string(),
+        "registry IDL cache seeding failed at startup".to_string(),
+    )
+    .await
+    .expect("mark_program_error should succeed");
+
+    // Post-condition: programs.status flipped to 'error'.
+    let status: String =
+        sqlx::query_scalar(r#"SELECT "status" FROM "programs" WHERE "program_id" = $1"#)
+            .bind(program_id)
+            .fetch_one(&pool)
+            .await
+            .expect("programs row should still exist");
+    assert_eq!(status, "error");
+
+    // Post-condition: indexer_state.error_message captured the failure
+    // reason and status flipped to 'error' too.
+    let row = sqlx::query(
+        r#"SELECT "status", "error_message" FROM "indexer_state" WHERE "program_id" = $1"#,
+    )
+    .bind(program_id)
+    .fetch_one(&pool)
+    .await
+    .expect("indexer_state row should exist");
+    let state_status: String = row.get("status");
+    let error_message: Option<String> = row.get("error_message");
+    assert_eq!(state_status, "error");
+    assert_eq!(
+        error_message.as_deref(),
+        Some("registry IDL cache seeding failed at startup")
+    );
+
+    cleanup(&pool, program_id).await;
+}
+
+#[tokio::test]
+#[ignore] // requires running PostgreSQL
+async fn idl_json_persisted_bytes_are_byte_exact() {
+    // Story 4.4 AC5: read back the persisted bytes from `programs.idl_json`
+    // after a successful registration and confirm they are byte-identical to
+    // the bytes the operator uploaded — not a re-serialization that drops
+    // unmodeled fields or canonicalizes key order.
+    let pool = setup_pool().await;
+    let program_id = "Teste1111111111111111111111111111111111111111";
+
+    cleanup(&pool, program_id).await;
+
+    // Deliberately unusual whitespace + key order so a silent re-serialize
+    // would produce different bytes.
+    let raw_json = "{\n  \"address\": \"11111111111111111111111111111111\",\n  \"metadata\": {\n    \"version\": \"0.1.0\",\n    \"name\":    \"test_program\",\n    \"spec\":   \"0.1.0\"\n  },\n  \"instructions\": [],\n  \"accounts\": [],\n  \"types\": []\n}";
+
+    let idl_manager = IdlManager::new("http://localhost:8899".to_string());
+    let mut registry = ProgramRegistry::new(idl_manager);
+    let data = registry
+        .prepare_registration(program_id.to_string(), Some(raw_json.to_string()))
+        .expect("prepare should succeed");
+    let original_hash = data.idl_hash.clone();
+
+    ProgramRegistry::commit_registration(pool.clone(), data)
+        .await
+        .expect("commit should succeed");
+
+    // Read back the persisted bytes.
+    let persisted: String =
+        sqlx::query_scalar(r#"SELECT "idl_json" FROM "programs" WHERE "program_id" = $1"#)
+            .bind(program_id)
+            .fetch_one(&pool)
+            .await
+            .expect("programs row should exist");
+
+    assert_eq!(
+        persisted, raw_json,
+        "persisted idl_json must be byte-exact to the original upload"
+    );
+    assert_eq!(
+        solarix::idl::compute_idl_hash(&persisted),
+        original_hash,
+        "compute_idl_hash(persisted) must match the registration-time idl_hash"
+    );
+
+    cleanup(&pool, program_id).await;
+}
+
+#[tokio::test]
+#[ignore] // requires running PostgreSQL
 async fn register_duplicate_program_returns_error() {
     let pool = setup_pool().await;
     // Valid base58 Solana pubkey for test isolation

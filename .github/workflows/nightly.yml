@@ -13,7 +13,11 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
+  # PR comments live on the issues API (`github.rest.issues.createComment`),
+  # so the failure-notification step needs `issues: write`. Granting only
+  # `pull-requests: write` would let the workflow load but the createComment
+  # call would 403 at runtime.
+  issues: write
 
 concurrency:
   group: nightly-mainnet-smoke
@@ -28,7 +32,12 @@ jobs:
     name: mainnet smoke (devnet pipeline → mainnet reads)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
+    # NOTE: `continue-on-error` is set on the test STEP below (not on the job)
+    # so the job's overall status reflects the test failure and the
+    # `if: failure()` notification step actually fires. Setting it at the job
+    # level forces job status to success and silently kills the notification
+    # path.
+    #
     # Soft-gate: this workflow is a no-op until Story 6.5 ships the test file
     # AND the `mainnet-smoke` cargo feature. Without this guard,
     # `cargo test --features mainnet-smoke` would error out with
@@ -38,24 +47,51 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - name: Install toolchain (pinned MSRV)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88"
+      - name: Verify mainnet-smoke cargo feature exists
+        id: feature_check
+        # Belt-and-braces guard alongside the job-level `hashFiles` check —
+        # `tests/mainnet_smoke.rs` and `[features] mainnet-smoke = []` may
+        # land in separate PRs, and the cargo feature must exist before
+        # `cargo test --features mainnet-smoke` is run. We set an output
+        # rather than failing the step so the rest of the job can short-
+        # circuit cleanly via `if:` (GitHub Actions has no native "skip"
+        # exit code).
+        run: |
+          if grep -q '^mainnet-smoke\b' Cargo.toml; then
+            echo "feature_present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "feature_present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::tests/mainnet_smoke.rs exists but [features] mainnet-smoke is not declared in Cargo.toml — skipping rest of job"
+          fi
+      - name: Install pinned MSRV toolchain
+        if: steps.feature_check.outputs.feature_present == 'true'
+        uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache cargo registry + target (separate from per-PR cache)
+        if: steps.feature_check.outputs.feature_present == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           # Deliberately separate from `solarix-ci` so the cron run does not
           # pollute the per-PR cache.
           shared-key: "solarix-nightly"
       - name: Run mainnet smoke
+        if: steps.feature_check.outputs.feature_present == 'true'
+        id: run_smoke
+        # `continue-on-error` lives on the STEP, not the job, so the workflow
+        # job status correctly reflects the failure and the notification step
+        # below actually runs.
+        continue-on-error: true
         env:
           # Devnet for the pipeline, mainnet only for the specific reads the
           # smoke test needs. Story 6.5 owns the exact test surface.
           SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
         run: cargo test --release --features mainnet-smoke -- mainnet_smoke
       - name: Comment on most recent merged PR on failure
-        if: failure()
+        # The test step uses `continue-on-error: true`, which makes its
+        # `outcome` reflect the real exit code while `conclusion` is forced
+        # to success. We branch on `steps.run_smoke.outcome == 'failure'`
+        # rather than `if: failure()` because the latter would never trigger
+        # when continue-on-error is in play.
+        if: steps.run_smoke.outcome == 'failure'
         uses: actions/github-script@v7
         with:
           script: |

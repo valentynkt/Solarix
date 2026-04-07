@@ -1,6 +1,7 @@
 # Solarix
 
-[![CI](https://github.com/valentynkit/Solarix/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/valentynkit/Solarix/actions/workflows/ci.yml)
+[![CI](https://github.com/valentynkt/Solarix/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/valentynkt/Solarix/actions/workflows/ci.yml)
+[![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-orange.svg)](rust-toolchain.toml)
 
 **Universal Solana indexer** that dynamically generates PostgreSQL schemas from any Anchor IDL at runtime.
 

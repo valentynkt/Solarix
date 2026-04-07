@@ -1,23 +1,45 @@
 # cargo-deny policy for Solarix — see docs/adr/0002-ci-pipeline.md for rationale.
 #
 # Subsection gating (matches CI `security` job):
-#   [advisories]  → hard gate (blocks the job on any advisory)
+#   [advisories]  → hard gate (blocks the job on any advisory in advisory-db)
 #   [bans]        → hard gate
 #   [sources]     → hard gate
-#   [licenses]    → fail-soft for Sprint 5 (warn only; Solana ecosystem has
-#                   weird license metadata and a hard gate would red Day-1 CI).
-#                   Revisit post-bounty.
+#   [licenses]    → fail-soft for Sprint 5. The CI `security` job runs
+#                   `cargo deny check advisories bans sources` (NOT `licenses`),
+#                   so the [licenses] section below is not currently enforced.
+#                   It is kept for documentation and so a contributor running
+#                   `cargo deny check licenses` locally still gets a sane
+#                   policy. The fail-soft strategy in v2 cargo-deny is "do not
+#                   run the licenses subcommand", because v2 removed the
+#                   per-class warn/deny knobs (`unlicensed`, `copyleft`,
+#                   `default`) that the legacy schema used. Revisit post-bounty.
+#
+# Schema is `version = 2` so we opt into the modern cargo-deny key set
+# explicitly. Without `version = 2`, key semantics drift across cargo-deny
+# releases (the legacy `vulnerability/unmaintained/notice/unsound` keys were
+# removed in v2 in favor of "any advisory match is an error unless ignored").
 
 [advisories]
+version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
+# v2 semantics: every advisory in advisory-db (vulnerability, unmaintained,
+# notice, unsound, yanked) is treated as an error unless its ID is in `ignore`.
+# This catches the `backoff` RUSTSEC-2025-0012 unmaintained advisory that
+# motivated this whole CI story — under v2 the unmaintained class is no
+# longer a separate warn/deny knob, it just fails like everything else.
 yanked = "deny"
 ignore = []
 
 [licenses]
-# Fail-soft for Sprint 5 — see D5 in ADR-0002. `allow` lists the licenses we
-# explicitly accept; anything not on the list is downgraded to a warning via
-# `unlicensed = "warn"` rather than a hard failure.
+version = 2
+# Per the section header above, this block is kept for documentation only —
+# the CI `security` job does NOT run `cargo deny check licenses` for Sprint 5.
+# The Solana ecosystem includes crates with license metadata that cargo-deny
+# v2 cannot recognize without per-crate clarifications, and a hard gate would
+# red the security job on Day 1 with no actionable fix path. Revisit
+# post-bounty by either expanding `allow` exhaustively or adding
+# `[[licenses.exceptions]]` for the problematic crates.
 unused-allowed-license = "warn"
 confidence-threshold = 0.8
 allow = [

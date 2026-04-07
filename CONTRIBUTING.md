@@ -21,7 +21,7 @@ in the pipeline has a local-cargo equivalent so you can verify before pushing.
 | `integration`      | `cargo test --release --tests` (or `cargo test --release --tests --features integration` after Story 6.5 ships the harness)                         |
 | `coverage`         | `cargo llvm-cov --release --lib --summary-only`                                                                                                     |
 | `fuzz-smoke`       | `cargo +nightly fuzz run decode_instruction -- -max_total_time=60` (requires Story 6.4 fuzz target)                                                 |
-| `security`         | `cargo audit && cargo deny check && gitleaks detect --source . --config .gitleaks.toml --no-banner --redact`                                        |
+| `security`         | `cargo audit && cargo deny check advisories bans sources && gitleaks detect --source . --config .gitleaks.toml`                                     |
 | `docker-smoke`     | `docker compose down -v && docker compose up --build -d && curl --retry 12 --retry-delay 5 --retry-connrefused --fail http://localhost:3000/health` |
 | `msrv`             | `cargo +1.88 build --release`                                                                                                                       |
 | `toolchain-matrix` | `cargo +stable build --release` and `cargo +beta build --release`                                                                                   |
@@ -32,6 +32,10 @@ Most jobs only need `cargo`. A few jobs install extra tooling in CI that you may
 want to pre-install locally:
 
 ```bash
+# MSRV toolchain (matches `rust-toolchain.toml`)
+rustup toolchain install 1.88
+rustup component add --toolchain 1.88 rustfmt clippy
+
 # Coverage
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov --locked

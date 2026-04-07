@@ -52,6 +52,11 @@ pub struct RegistrationData {
     pub idl_hash: String,
     pub idl_source: String,
     pub idl: Idl,
+    /// Raw IDL JSON bytes as fetched on-chain or uploaded by the operator.
+    /// Persisted verbatim into `programs.idl_json` so that
+    /// `compute_idl_hash(idl_json) == idl_hash` holds across the round trip.
+    /// Story 4.4 AC5.
+    pub idl_json: String,
     /// Whether the IDL was already in the cache before `prepare_registration`.
     /// Used by `rollback_cache` to decide whether to remove the entry on failure.
     pub was_cached: bool,
@@ -110,6 +115,10 @@ impl ProgramRegistry {
         let program_name = cached.idl.metadata.name.clone();
         let schema_name = derive_schema_name(&program_name, &program_id);
         let idl = cached.idl.clone();
+        // Raw bytes are what `idl_hash` was computed from. Persisting these
+        // (instead of `serde_json::to_string(&idl)`) keeps the
+        // `compute_idl_hash(persisted) == idl_hash` invariant. Story 4.4 AC5.
+        let idl_json = cached.raw_json.clone();
 
         Ok(RegistrationData {
             program_id,
@@ -118,6 +127,7 @@ impl ProgramRegistry {
             idl_hash,
             idl_source,
             idl,
+            idl_json,
             was_cached,
         })
     }
@@ -140,13 +150,15 @@ impl ProgramRegistry {
             idl_hash,
             idl_source,
             idl,
+            idl_json,
             was_cached: _,
         } = data;
 
-        // Serialize IDL to JSON for persistence (enables pipeline auto-start on restart)
-        let idl_json_string = serde_json::to_string(&idl)
-            .map_err(|e| RegistrationError::DatabaseError(format!("idl serialize failed: {e}")))?;
-
+        // Persist the **raw bytes** that idl_hash was computed from, NOT a
+        // re-serialization of the parsed `Idl` struct. This is what keeps the
+        // round trip `compute_idl_hash(read_back_bytes) == idl_hash` exact —
+        // re-serializing through `serde_json::to_string(&idl)` would silently
+        // drop fields not modeled by `anchor_lang_idl_spec::Idl`. Story 4.4 AC5.
         Self::write_registration(
             pool.clone(),
             program_id.clone(),
@@ -154,7 +166,7 @@ impl ProgramRegistry {
             schema_name.clone(),
             idl_hash.clone(),
             idl_source.clone(),
-            idl_json_string,
+            idl_json,
         )
         .await?;
 
@@ -282,6 +294,63 @@ impl ProgramRegistry {
         })
     }
 
+    /// Mark a program as `status = 'error'` and stash a human-readable
+    /// failure message in `indexer_state.error_message`. Used by the startup
+    /// auto-start path when registry IDL cache seeding fails for a program
+    /// that was successfully registered earlier — keeps the API consistent
+    /// (operators see status=error instead of a 200 from `/api/programs/{id}`
+    /// alongside 404s from the instructions handler). Story 4.4 Task 6
+    /// (refined P15).
+    ///
+    /// Returns a boxed `Send` future for the same reason as
+    /// `update_program_status` — the in-flight transaction holds an
+    /// `Executor`-bound reference whose lifetime would otherwise propagate
+    /// through the opaque return type and break Send inference at the
+    /// caller's `await`.
+    pub fn mark_program_error(
+        pool: PgPool,
+        program_id: String,
+        error_message: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), RegistrationError>> + Send>> {
+        Box::pin(async move {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
+            sqlx::query(
+                r#"UPDATE "programs" SET "status" = 'error', "updated_at" = NOW()
+                   WHERE "program_id" = $1"#,
+            )
+            .bind(&program_id)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
+            // The indexer_state row may not exist yet for some upgrade paths;
+            // an UPDATE that affects 0 rows is not an error here, it just
+            // means the operator will only see the failure on the programs
+            // row. We deliberately do NOT INSERT a fallback row — that would
+            // race with the pipeline's own initializer.
+            sqlx::query(
+                r#"UPDATE "indexer_state"
+                   SET "status" = 'error', "error_message" = $2
+                   WHERE "program_id" = $1"#,
+            )
+            .bind(&program_id)
+            .bind(&error_message)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
+            tx.commit()
+                .await
+                .map_err(|e| RegistrationError::DatabaseError(e.to_string()))?;
+
+            Ok(())
+        })
+    }
+
     /// Roll back IDL cache entry added during a failed registration.
     pub fn rollback_cache(&mut self, program_id: &str) {
         self.idl_manager.remove_cached(program_id);
@@ -363,6 +432,7 @@ impl ProgramRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::idl::compute_idl_hash;
 
     // -----------------------------------------------------------------------
     // Send-safety compile-time checks (Story 6.4 AC9)
@@ -387,5 +457,63 @@ mod tests {
             _require_send(&fut);
         }
         let _: fn(PgPool, RegistrationData) = _check;
+    }
+
+    #[test]
+    fn test_mark_program_error_future_is_send() {
+        fn _check(pool: PgPool, program_id: String, error_message: String) {
+            fn _require_send<T: Send>(_: &T) {}
+            let fut = ProgramRegistry::mark_program_error(pool, program_id, error_message);
+            _require_send(&fut);
+        }
+        let _: fn(PgPool, String, String) = _check;
+    }
+
+    // -----------------------------------------------------------------------
+    // Story 4.4 AC5 — hash stability: persisted bytes match `idl_hash`.
+    //
+    // The contract: the bytes carried into `RegistrationData.idl_json`
+    // (which `commit_registration` writes verbatim into `programs.idl_json`)
+    // must hash to the same value as `RegistrationData.idl_hash`.
+    //
+    // We use deliberately unusual whitespace and key ordering in the input
+    // JSON to prove that we're carrying the *original* bytes through, not a
+    // re-serialization of the parsed `Idl` struct (which would silently
+    // canonicalize and drop unmodeled fields).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn registration_data_idl_json_hashes_to_idl_hash() {
+        let raw_json = "{\n  \"address\": \"11111111111111111111111111111111\",\n  \"metadata\": {\n    \"version\": \"0.1.0\",\n    \"name\":    \"test_program\",\n    \"spec\":   \"0.1.0\"\n  },\n  \"instructions\": [],\n  \"accounts\": [],\n  \"types\": []\n}";
+
+        let idl_manager = IdlManager::new("http://localhost:8899".to_string());
+        let mut registry = ProgramRegistry::new(idl_manager);
+
+        let data = registry
+            .prepare_registration(
+                "Testc11111111111111111111111111111111111111".to_string(),
+                Some(raw_json.to_string()),
+            )
+            .expect("prepare_registration should succeed");
+
+        // The raw bytes are preserved verbatim in `RegistrationData.idl_json`.
+        assert_eq!(data.idl_json, raw_json, "idl_json must be byte-exact");
+
+        // And those bytes hash to the value stored as idl_hash. This is the
+        // round-trip invariant the story exists to protect.
+        assert_eq!(
+            compute_idl_hash(&data.idl_json),
+            data.idl_hash,
+            "compute_idl_hash(persisted bytes) must equal idl_hash"
+        );
+
+        // Sanity check: re-serializing the parsed Idl produces *different*
+        // bytes (whitespace canonicalization, key reordering), so the test
+        // would fail if `commit_registration` silently re-serialized
+        // through `serde_json::to_string(&idl)`.
+        let reserialized = serde_json::to_string(&data.idl).expect("re-serialize Idl");
+        assert_ne!(
+            reserialized, raw_json,
+            "re-serialized bytes should differ from raw — otherwise the test isn't actually proving byte preservation"
+        );
     }
 }

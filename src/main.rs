@@ -99,25 +99,53 @@ async fn main() -> Result<(), SolarixError> {
 
     // Seed the registry's IDL cache with persisted IDLs so API queries work.
     // This is the IDL persistence path tracked under story 4.4.
-    {
+    //
+    // If seeding fails for a program, drop it from the auto-start list AND
+    // mark `programs.status = 'error'` (with the failure message stored in
+    // `indexer_state.error_message`) so the API stays consistent — operators
+    // see status=error instead of a 200 from /api/programs/{id} alongside
+    // 404s from /api/programs/{id}/instructions/{name}. (Story 4.4 Task 6,
+    // refined P15.)
+    let seed_outcomes: Vec<bool> = {
         let mut reg = registry.write().await;
+        let mut outcomes = Vec::with_capacity(programs.len());
         for p in &programs {
-            let idl_json = match serde_json::to_string(&p.idl) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(program_id = %p.program_id, error = %e, "failed to serialize loaded IDL for cache seeding");
-                    continue;
-                }
-            };
-            if let Err(e) = reg.idl_manager.insert_fetched_idl(
+            match reg.idl_manager.insert_fetched_idl(
                 &p.program_id,
-                &idl_json,
+                &p.idl_json,
                 solarix::idl::IdlSource::OnChain,
             ) {
-                warn!(program_id = %p.program_id, error = %e, "failed to seed registry cache");
+                Ok(_) => outcomes.push(true),
+                Err(e) => {
+                    warn!(program_id = %p.program_id, error = %e, "failed to seed registry cache; marking status=error");
+                    outcomes.push(false);
+                }
             }
         }
+        outcomes
+    };
+
+    // Mark seeding failures as `status = 'error'` in the DB **after** the
+    // write lock is released, so the registry isn't held across an await.
+    let mut programs_to_start: Vec<StartupProgram> = Vec::with_capacity(programs.len());
+    for (program, ok) in programs.into_iter().zip(seed_outcomes.iter().copied()) {
+        if ok {
+            programs_to_start.push(program);
+        } else if let Err(e) = ProgramRegistry::mark_program_error(
+            pool.clone(),
+            program.program_id.clone(),
+            "registry IDL cache seeding failed at startup".to_string(),
+        )
+        .await
+        {
+            warn!(
+                program_id = %program.program_id,
+                error = %e,
+                "failed to persist status=error after cache seeding failure"
+            );
+        }
     }
+    let programs = programs_to_start;
 
     // If a signal arrived during init, exit before spawning anything heavy.
     if cancel.is_cancelled() {
@@ -317,6 +345,10 @@ struct StartupProgram {
     program_id: String,
     schema_name: String,
     idl: anchor_lang_idl_spec::Idl,
+    /// Raw IDL JSON bytes as stored in `programs.idl_json`. Carried through
+    /// to the cache seeding step so the in-memory cache holds the same bytes
+    /// the hash was computed from. Story 4.4 AC5.
+    idl_json: String,
 }
 
 /// Query the programs table for programs with persisted IDL JSON.
@@ -359,6 +391,7 @@ async fn query_registered_programs(pool: &PgPool) -> Result<Vec<StartupProgram>,
                     program_id,
                     schema_name,
                     idl,
+                    idl_json: json,
                 });
             }
             Err(e) => {

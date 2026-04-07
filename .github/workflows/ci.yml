@@ -32,9 +32,8 @@ jobs:
         with:
           fetch-depth: 1
       - name: Install toolchain (pinned MSRV via rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
-          toolchain: "1.88"
           components: rustfmt, clippy
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
@@ -54,9 +53,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88"
+        uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
@@ -84,16 +81,20 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgres://solarix:solarix@localhost:5432/solarix
-      SOLANA_RPC_URL: https://api.devnet.solana.com
       RUST_LOG: warn
+      # NOTE: SOLANA_RPC_URL is NOT set at this level. The integration tests
+      # that run today (bootstrap_test.rs, registration_test.rs) do not hit
+      # the Solana RPC — they only exercise the DB bootstrap and registration
+      # paths. Any future test that needs RPC should use a LiteSVM harness or
+      # a local RPC fake; devnet is too rate-limited and too flaky for the
+      # per-PR critical path (see ADR-0002 D2 — this is the same reason the
+      # mainnet smoke test is isolated into `nightly.yml`).
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88"
+        uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
@@ -116,22 +117,37 @@ jobs:
     name: coverage (lcov artifact)
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    needs: unit
+    # NOTE: intentionally no `needs: unit`. Both jobs build the same code;
+    # running them in parallel means a broken PR surfaces both failures at
+    # once and the 12-minute end-to-end target is easier to hit. The previous
+    # `needs: unit` gave no correctness benefit.
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # Coverage does not currently need git history; the delta gate is
+          # descoped (ADR-0002 D3). Restore to `fetch-depth: 0` when the
+          # delta-gate follow-up story lands.
+          fetch-depth: 1
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
-          toolchain: "1.88"
           components: llvm-tools-preview
       - name: Cache cargo registry + target
+        # Separate cache key from the rest of `solarix-ci` because
+        # `cargo-llvm-cov` sets `RUSTFLAGS=-Cinstrument-coverage`, which
+        # produces `.rlib` artifacts that are incompatible with the other
+        # jobs' builds. Sharing the cache would cause thrashing (either
+        # job's target/ would force the other to fully rebuild).
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "solarix-ci"
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
+          shared-key: "solarix-ci-coverage"
+      - name: Install cargo-llvm-cov (cached binary)
+        # `cargo install --locked` re-compiles from source every run (~3–5 min
+        # cold tax). `taiki-e/install-action` fetches a prebuilt binary and
+        # caches it per version, bringing the install down to a few seconds.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - name: Run coverage (lib only — see ADR-0002 D6)
         run: cargo llvm-cov --release --lib --lcov --output-path lcov.info
       - name: Print coverage summary
@@ -142,13 +158,20 @@ jobs:
           name: lcov-info
           path: lcov.info
           retention-days: 14
+          # Fail the step (not just warn) if `cargo llvm-cov` silently
+          # produced no output. The default `warn` hides this regression.
+          if-no-files-found: error
 
   fuzz-smoke:
     name: fuzz smoke (60s)
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    # Soft-gate: no-op until Story 6.4 ships the fuzz target.
-    if: hashFiles('fuzz/Cargo.toml') != ''
+    # NOTE: this job is now a HARD gate on every run. The original "soft gate"
+    # guard `if: hashFiles('fuzz/Cargo.toml') != ''` was permanently true
+    # because Story 6.4 already landed `fuzz/Cargo.toml` and
+    # `fuzz/fuzz_targets/decode_instruction.rs` before this story merged
+    # (see ADR-0002 § D1). Removing the guard matches what actually runs.
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -159,8 +182,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "solarix-ci-nightly"
-      - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz --locked
+      - name: Install cargo-fuzz (cached binary)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Run fuzz smoke
         run: cargo +nightly fuzz run decode_instruction -- -max_total_time=60
 
@@ -175,21 +200,19 @@ jobs:
           # want history too.
           fetch-depth: 0
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88"
+        uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "solarix-ci"
-      - name: Install cargo-audit and cargo-deny
-        run: |
-          cargo install cargo-audit --locked
-          cargo install cargo-deny --locked
+      - name: Install cargo-audit and cargo-deny (cached binaries)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
       - name: cargo audit
         run: cargo audit --deny warnings
-      - name: cargo deny check
-        run: cargo deny check
+      - name: cargo deny check (advisories + bans + sources — licenses is fail-soft per ADR-0002 D5)
+        run: cargo deny check advisories bans sources
       - name: gitleaks
         uses: gitleaks/gitleaks-action@v2
         with:
@@ -213,8 +236,15 @@ jobs:
       - name: docker compose up --build -d
         run: docker compose up --build -d
       - name: Wait for /health
+        # 30 retries × 10 s = 300 s ceiling on runtime startup. The in-container
+        # Solarix build already completed during `docker compose up --build`,
+        # so this budget is purely for the binary cold-start + postgres
+        # healthcheck + axum route mounting window. `--retry-all-errors`
+        # covers a race where `/health` briefly 404s during route mounting
+        # (default `--retry` only covers 5xx + connection-refused).
         run: |
-          curl --retry 12 --retry-delay 5 --retry-connrefused --fail \
+          curl --retry 30 --retry-delay 10 --retry-connrefused --retry-all-errors --fail \
+            --connect-timeout 5 \
             http://localhost:3000/health
       - name: Soft-check /ready (warning only until Story 6.3)
         run: |
@@ -223,28 +253,37 @@ jobs:
           else
             echo "::warning::/ready not yet implemented (Story 6.3)"
           fi
-      - name: Log format check (head -5 must be valid JSON)
+      - name: Log format check (every captured line must be valid JSON)
         run: |
           set -euo pipefail
           docker compose logs solarix --no-log-prefix > /tmp/solarix.log
-          head -5 /tmp/solarix.log | grep -v '^$' > /tmp/solarix-head.log || true
-          if [ ! -s /tmp/solarix-head.log ]; then
+          if [ ! -s /tmp/solarix.log ]; then
             echo "::error::No log lines captured from solarix container"
             exit 1
           fi
+          # Scan the full log (not just the first 5 lines). The previous
+          # `head -5` version would false-negative on any `pretty` regression
+          # that landed after the startup banner, and false-positive on any
+          # clap/dotenv warning that landed in the first 5 lines.
           python3 - <<'PY'
           import json, sys
-          path = "/tmp/solarix-head.log"
-          for i, line in enumerate(open(path), 1):
-              line = line.strip()
-              if not line:
-                  continue
-              try:
-                  json.loads(line)
-              except json.JSONDecodeError as e:
-                  print(f"::error::Non-JSON log line {i}: {line}")
-                  sys.exit(1)
-          print("All captured log lines are valid JSON")
+          path = "/tmp/solarix.log"
+          count = 0
+          with open(path) as f:
+              for i, raw in enumerate(f, 1):
+                  line = raw.strip()
+                  if not line:
+                      continue
+                  try:
+                      json.loads(line)
+                  except json.JSONDecodeError:
+                      print(f"::error::Non-JSON log line {i}: {line}")
+                      sys.exit(1)
+                  count += 1
+          if count == 0:
+              print("::error::No non-empty log lines found — container may have crashed silently")
+              sys.exit(1)
+          print(f"All {count} captured log lines are valid JSON")
           PY
       - name: Soft-check /metrics (warning only until Story 6.2)
         run: |
@@ -263,9 +302,15 @@ jobs:
           name: docker-smoke-logs
           path: solarix.log
           retention-days: 7
+          if-no-files-found: warn
       - name: Cleanup
+        # Intentionally NOT using `|| true` here. A cleanup failure means
+        # `docker compose down -v` could not tear down the containers, which
+        # is a real problem we want surfaced — not silently masked.
+        # `if: always()` still guarantees the step runs on both success and
+        # failure branches.
         if: always()
-        run: docker compose down -v || true
+        run: docker compose down -v
 
   msrv:
     name: msrv build (1.88)
@@ -276,9 +321,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Install pinned MSRV toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88"
+        uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
@@ -286,31 +329,53 @@ jobs:
       - name: cargo build --release
         run: cargo build --release
 
-  toolchain-matrix:
-    name: toolchain matrix (stable, beta)
+  # The matrix for stable/beta is split into two explicit jobs rather than a
+  # `strategy.matrix` block. GitHub Actions does not allow expressions in
+  # `uses:` fields, so a matrix would force the action ref back to
+  # `dtolnay/rust-toolchain@master` (a moving target that the action's own
+  # README discourages). Two explicit jobs trade a few YAML lines for an
+  # elimination of the `@master` supply-chain hole.
+
+  toolchain-stable:
+    name: toolchain build (stable)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        toolchain: [stable, beta]
-    continue-on-error: ${{ matrix.toolchain == 'beta' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - name: Install ${{ matrix.toolchain }} toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "solarix-ci-${{ matrix.toolchain }}"
+          shared-key: "solarix-ci-stable"
       - name: cargo build --release
-        # Override the pinned rust-toolchain.toml channel for this job — the
-        # point of the matrix is to exercise stable and beta against the same
-        # Cargo.lock.
+        # `RUSTUP_TOOLCHAIN` env overrides `rust-toolchain.toml` per rustup
+        # docs, so the job actually exercises stable instead of the pinned
+        # MSRV channel.
         env:
-          RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+          RUSTUP_TOOLCHAIN: stable
+        run: cargo build --release
+
+  toolchain-beta:
+    name: toolchain build (beta)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Beta is allowed to flake — surfacing upcoming breakages as a warning
+    # annotation, not a hard fail.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install beta toolchain
+        uses: dtolnay/rust-toolchain@beta
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "solarix-ci-beta"
+      - name: cargo build --release
+        env:
+          RUSTUP_TOOLCHAIN: beta
         run: cargo build --release

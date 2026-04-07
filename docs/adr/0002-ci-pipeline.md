@@ -24,30 +24,32 @@ decisions so future contributors do not relitigate them.
 ### D1. Soft-gates for jobs that depend on un-landed stories
 
 Several CI jobs in Story 6.7 depend on artifacts that other Epic-6 stories
-produce (the fuzz target from 6.4, `/ready` from 6.3, `/metrics` from 6.2, the
-`integration` cargo feature and testcontainer harness from 6.5, the
-`mainnet-smoke` feature and test file from 6.5). The epic sequencing puts 6.4
-and 6.7 in parallel on Day 1–2, which means **most of the test infrastructure
-does not exist yet** when the CI workflow lands.
-
-Each affected job uses a `if: hashFiles('<artifact>') != ''` guard or a
-conditional `curl` step that degrades to a warning. The SAME PR that lands the
-dependency removes the guard and turns the soft check into a hard gate. This
-keeps 6.7 a real merge candidate on Day 1 without painting the CI badge red.
+produce (`/ready` from 6.3, `/metrics` from 6.2, the testcontainer harness
+from 6.5, the `mainnet-smoke` feature and test file from 6.5). Each affected
+job uses a `if: <guard>` step or a conditional `curl` step that degrades to a
+warning. The SAME PR that lands the dependency removes the guard and turns
+the soft check into a hard gate. This keeps 6.7 a real merge candidate on
+Day 1 without painting the CI badge red.
 
 Soft-gated today:
 
-| Job                                   | Guard                                             | Removed by          |
-| ------------------------------------- | ------------------------------------------------- | ------------------- |
-| `fuzz-smoke`                          | `if: hashFiles('fuzz/Cargo.toml') != ''`          | Story 6.4           |
-| `docker-smoke` step "wait for /ready" | warning-only curl                                 | Story 6.3           |
-| `docker-smoke` step "metrics check"   | warning-only curl                                 | Story 6.2           |
-| `nightly.yml` entire workflow         | `if: hashFiles('tests/mainnet_smoke.rs') != ''`   | Story 6.5           |
-| `integration` job                     | branches on `grep -q '^integration\b' Cargo.toml` | Story 6.5 (harness) |
+| Job                                   | Guard                                                                                              | Removed by          |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------- |
+| `docker-smoke` step "wait for /ready" | warning-only curl                                                                                  | Story 6.3           |
+| `docker-smoke` step "metrics check"   | warning-only curl                                                                                  | Story 6.2           |
+| `nightly.yml` entire workflow         | `if: hashFiles('tests/mainnet_smoke.rs') != ''` AND a `grep` for the `mainnet-smoke` cargo feature | Story 6.5           |
+| `integration` job                     | branches on `grep -q '^integration\b' Cargo.toml`                                                  | Story 6.5 (harness) |
+
+`fuzz-smoke` was originally on this list with a guard
+`if: hashFiles('fuzz/Cargo.toml') != ''`. That guard was always-true the
+moment Story 6-7 merged, because Story 6.4 had already landed
+`fuzz/Cargo.toml` and `fuzz/fuzz_targets/decode_instruction.rs` first. The
+guard was removed in the post-merge code review (see Story 6-7 review
+findings) and `fuzz-smoke` became a hard gate from Day 1.
 
 Hard-gated from Day 1: `lint`, `unit`, `coverage`, `security`, `msrv`,
-`toolchain-matrix`, and the always-on parts of `docker-smoke` (reset, build,
-`/health` wait, JSON log check, cleanup).
+`toolchain-stable`, `toolchain-beta`, `fuzz-smoke`, and the always-on parts
+of `docker-smoke` (reset, build, `/health` wait, JSON log check, cleanup).
 
 ### D2. Nightly mainnet smoke as a separate workflow file
 
