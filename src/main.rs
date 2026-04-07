@@ -10,10 +10,31 @@ use tracing::{error, info, warn};
 
 use solarix::config::Config;
 use solarix::idl::IdlManager;
+use solarix::pipeline::update_indexer_state;
 use solarix::registry::ProgramRegistry;
+use solarix::storage::StorageError;
+
+/// Top-level error type so `main` can return a `Result` and let the runtime
+/// produce the right exit code (0 = clean, 1 = any error path). Spec forbids
+/// `std::process::exit` (story 4.3 anti-patterns).
+#[derive(Debug, thiserror::Error)]
+enum SolarixError {
+    #[error("storage: {0}")]
+    Storage(#[from] StorageError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("pipeline: {0}")]
+    Pipeline(#[from] solarix::pipeline::PipelineError),
+    #[error("API server: {0}")]
+    ApiServer(String),
+    #[error("pipeline task panicked: {0}")]
+    PipelineJoin(String),
+    #[error("API task panicked: {0}")]
+    ApiJoin(String),
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), SolarixError> {
     dotenvy::dotenv().ok();
 
     let config = Config::parse();
@@ -70,10 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = ProgramRegistry::new(idl_manager);
     let registry = Arc::new(RwLock::new(registry));
 
-    // Check for registered programs to auto-start pipeline
-    let programs = query_registered_programs(&pool).await;
+    // Check for registered programs to auto-start pipeline. A DB error here
+    // is fatal — we MUST NOT silently degrade into "API-only" mode if the
+    // programs table is unreachable; supervisors would never see the failure
+    // and indexing would silently die. (Story 4.3 review patch P8.)
+    let programs = query_registered_programs(&pool).await?;
 
-    // Seed the registry's IDL cache with persisted IDLs so API queries work
+    // Seed the registry's IDL cache with persisted IDLs so API queries work.
+    // This is the IDL persistence path tracked under story 4.4.
     {
         let mut reg = registry.write().await;
         for p in &programs {
@@ -94,6 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // If a signal arrived during init, exit before spawning anything heavy.
+    if cancel.is_cancelled() {
+        info!("cancellation observed before startup; exiting");
+        graceful_shutdown(&pool, &[], &config).await;
+        return Ok(());
+    }
+
     let addr = format!("{}:{}", config.api_host, config.api_port);
 
     let state = Arc::new(solarix::api::AppState {
@@ -110,26 +142,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(addr = %addr, "listening");
 
-    let exit_code = if programs.is_empty() {
+    // Track which programs were actually started by this process so the
+    // shutdown phase only resets their indexer_state row. (Patch P14.)
+    let mut started_programs: Vec<String> = Vec::new();
+
+    let run_result: Result<(), SolarixError> = if programs.is_empty() {
         info!("no registered programs with IDL, running API server only");
         info!("register a program via POST /api/programs to start indexing");
 
-        // API-only mode: run until cancelled
         let api_cancel = cancel.clone();
         match axum::serve(listener, app)
             .with_graceful_shutdown(api_cancel.cancelled_owned())
             .await
         {
-            Ok(()) => 0,
+            Ok(()) => Ok(()),
             Err(e) => {
                 error!(error = %e, "server error");
-                1
+                Err(SolarixError::ApiServer(e.to_string()))
             }
         }
     } else {
-        // Pipeline mode: run API + pipeline concurrently
-        // Currently only the first program's pipeline runs. Multi-program concurrent
-        // indexing is tracked as deferred work — see deferred-work.md.
+        // Pipeline mode: run API + pipeline concurrently.
+        // Multi-program is tracked under deferred-work; we deterministically pick
+        // the lexicographically-first program (the SELECT already orders by
+        // program_id) so restarts are reproducible. (Patch P13.)
         if programs.len() > 1 {
             warn!(
                 count = programs.len(),
@@ -138,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         let program = &programs[0];
+        started_programs.push(program.program_id.clone());
         info!(
             program_id = %program.program_id,
             schema_name = %program.schema_name,
@@ -182,41 +219,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
         });
 
-        // Wait for either to finish — the other is stopped via cancel token
-        tokio::select! {
-            result = pipeline_handle => {
+        // Coordinated shutdown: whichever finishes first signals the other via
+        // the cancel token, then we await BOTH handles (with a drain timeout).
+        // Just dropping `select!`'s loser would detach its task and let
+        // `pool.close()` race in-flight queries. (Patch P6.)
+        let mut pipeline_handle = pipeline_handle;
+        let mut api_handle = api_handle;
+
+        let initial_outcome: Result<(), SolarixError> = tokio::select! {
+            result = &mut pipeline_handle => {
+                cancel.cancel();
                 match result {
-                    Ok(Ok(())) => info!("pipeline exited cleanly"),
-                    Ok(Err(e)) => error!(error = %e, "pipeline error"),
-                    Err(e) => error!(error = %e, "pipeline task panicked"),
+                    Ok(Ok(())) => {
+                        info!("pipeline exited cleanly");
+                        Ok(())
+                    }
+                    Ok(Err(e)) => {
+                        error!(error = %e, "pipeline error");
+                        Err(SolarixError::Pipeline(e))
+                    }
+                    Err(e) => {
+                        error!(error = %e, "pipeline task panicked");
+                        Err(SolarixError::PipelineJoin(e.to_string()))
+                    }
                 }
-                cancel.cancel(); // Stop API server too
-                0
             }
-            result = api_handle => {
+            result = &mut api_handle => {
+                cancel.cancel();
                 match result {
-                    Ok(Ok(())) => info!("API server exited"),
-                    Ok(Err(e)) => error!(error = %e, "API server error"),
-                    Err(e) => error!(error = %e, "API server task panicked"),
+                    Ok(Ok(())) => {
+                        info!("API server exited");
+                        Ok(())
+                    }
+                    Ok(Err(e)) => {
+                        error!(error = %e, "API server error");
+                        Err(SolarixError::ApiServer(e.to_string()))
+                    }
+                    Err(e) => {
+                        error!(error = %e, "API server task panicked");
+                        Err(SolarixError::ApiJoin(e.to_string()))
+                    }
                 }
-                cancel.cancel(); // Stop pipeline too
-                0
+            }
+        };
+
+        // Drain phase: bound the wait so a stuck handler can't hang shutdown
+        // forever. (Patch P2.)
+        let drain = Duration::from_secs(config.shutdown_drain_secs);
+        let drain_outcome = tokio::time::timeout(drain, async {
+            let api_res = (&mut api_handle).await;
+            let pipe_res = (&mut pipeline_handle).await;
+            (api_res, pipe_res)
+        })
+        .await;
+
+        match drain_outcome {
+            Ok((api_res, pipe_res)) => {
+                if let Err(e) = api_res {
+                    if !e.is_cancelled() {
+                        warn!(error = %e, "API task drain returned error");
+                    }
+                }
+                if let Err(e) = pipe_res {
+                    if !e.is_cancelled() {
+                        warn!(error = %e, "pipeline task drain returned error");
+                    }
+                }
+            }
+            Err(_) => {
+                warn!(
+                    drain_secs = config.shutdown_drain_secs,
+                    "shutdown drain timed out; aborting remaining tasks"
+                );
+                api_handle.abort();
+                pipeline_handle.abort();
             }
         }
+
+        initial_outcome
     };
 
-    // Graceful shutdown: final DB updates with timeout
-    graceful_shutdown(&pool, &programs, &config).await;
+    // Graceful shutdown: final indexer_state UPDATEs (with proper
+    // last_processed_slot via update_indexer_state), then pool.close().
+    graceful_shutdown(&pool, &started_programs, &config).await;
 
     info!(
         uptime_secs = start_time.elapsed().as_secs(),
+        outcome = if run_result.is_ok() { "clean" } else { "error" },
         "shutdown complete"
     );
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
+    run_result
 }
 
 /// Registered program info loaded from DB at startup.
@@ -230,26 +323,28 @@ struct StartupProgram {
 ///
 /// Returns programs with `status = 'schema_created'` and a non-null `idl_json` column,
 /// parsing the IDL JSON into the `Idl` type for pipeline use.
-async fn query_registered_programs(pool: &PgPool) -> Vec<StartupProgram> {
-    let rows = match sqlx::query_as::<_, (String, String, Option<String>)>(
+///
+/// A DB error is propagated as `StorageError::QueryFailed` so the supervisor
+/// sees a non-zero exit instead of a silent "no programs" startup.
+async fn query_registered_programs(pool: &PgPool) -> Result<Vec<StartupProgram>, StorageError> {
+    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
         r#"SELECT "program_id", "schema_name", "idl_json" FROM "programs"
-           WHERE "status" = 'schema_created'"#,
+           WHERE "status" = 'schema_created'
+           ORDER BY "program_id" ASC"#,
     )
     .fetch_all(pool)
     .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!(error = %e, "failed to query programs table");
-            return Vec::new();
-        }
-    };
+    .map_err(|e| {
+        error!(error = %e, "failed to query programs table");
+        StorageError::QueryFailed(format!("programs lookup failed: {e}"))
+    })?;
 
-    if rows.is_empty() {
-        return Vec::new();
+    let row_count = rows.len();
+    if row_count == 0 {
+        return Ok(Vec::new());
     }
 
-    info!(count = rows.len(), "found registered programs in DB");
+    info!(count = row_count, "found registered program rows in DB");
 
     let mut programs = Vec::new();
     for (program_id, schema_name, idl_json) in rows {
@@ -271,49 +366,110 @@ async fn query_registered_programs(pool: &PgPool) -> Vec<StartupProgram> {
             }
         }
     }
-    programs
+
+    if programs.is_empty() && row_count > 0 {
+        error!(
+            row_count,
+            "all registered programs failed to load IDL JSON; pipeline will not auto-start"
+        );
+    } else {
+        info!(
+            loaded = programs.len(),
+            row_count, "loaded persisted IDLs for pipeline auto-start"
+        );
+    }
+
+    Ok(programs)
 }
 
 /// Final shutdown sequence: update indexer_state and close pool.
-async fn graceful_shutdown(pool: &PgPool, programs: &[StartupProgram], config: &Config) {
-    // Update indexer_state to "stopped" for all active programs
-    for program in programs {
-        let timeout_dur = Duration::from_secs(config.shutdown_db_flush_secs);
-        match tokio::time::timeout(timeout_dur, async {
-            sqlx::query(
-                r#"UPDATE "indexer_state"
-                   SET "status" = 'stopped', "last_heartbeat" = NOW()
-                   WHERE "program_id" = $1"#,
-            )
-            .bind(&program.program_id)
-            .execute(pool)
-            .await
-        })
-        .await
-        {
-            Ok(Ok(_)) => {
-                info!(
-                    program_id = %program.program_id,
-                    "indexer_state set to stopped"
-                );
+///
+/// Only updates programs that this process actually started (`started_programs`),
+/// not every row in the DB. Updates run concurrently with one global timeout
+/// so N slow programs don't multiply the shutdown grace period. (Patch P14, P20.)
+async fn graceful_shutdown(pool: &PgPool, started_programs: &[String], config: &Config) {
+    if started_programs.is_empty() {
+        pool.close().await;
+        return;
+    }
+
+    let timeout_dur = Duration::from_secs(config.shutdown_db_flush_secs);
+
+    let updates = started_programs.iter().map(|program_id| {
+        let pool = pool.clone();
+        let program_id = program_id.clone();
+        async move {
+            // Carry the writer's authoritative slot into the indexer_state row.
+            // We read the highest known checkpoint at shutdown time so the row
+            // reflects what's actually durable. (Patch P3.)
+            let last_slot = read_max_checkpoint_slot(&pool, &program_id).await;
+            let res = update_indexer_state(&pool, &program_id, "stopped", last_slot).await;
+            (program_id, last_slot, res)
+        }
+    });
+
+    match tokio::time::timeout(timeout_dur, futures_util::future::join_all(updates)).await {
+        Ok(results) => {
+            for (program_id, last_slot, res) in results {
+                match res {
+                    Ok(()) => info!(
+                        program_id = %program_id,
+                        last_processed_slot = last_slot.unwrap_or(0),
+                        "indexer_state set to stopped"
+                    ),
+                    Err(e) => warn!(
+                        program_id = %program_id,
+                        error = %e,
+                        "failed to update indexer_state on shutdown"
+                    ),
+                }
             }
-            Ok(Err(e)) => {
-                warn!(
-                    program_id = %program.program_id,
-                    error = %e,
-                    "failed to update indexer_state on shutdown"
-                );
-            }
-            Err(_) => {
-                warn!(
-                    program_id = %program.program_id,
-                    "indexer_state update timed out on shutdown"
-                );
-            }
+        }
+        Err(_) => {
+            warn!(
+                drain_secs = config.shutdown_db_flush_secs,
+                programs = started_programs.len(),
+                "indexer_state shutdown updates timed out"
+            );
         }
     }
 
     pool.close().await;
+}
+
+/// Read the highest known checkpoint slot across all streams for a program.
+///
+/// Used at shutdown to record the durable cursor in `indexer_state.last_processed_slot`.
+/// Looks up the schema name from the `programs` table, then takes the max across all
+/// `_checkpoints` rows. Returns `None` on any error or when no checkpoint exists.
+async fn read_max_checkpoint_slot(pool: &PgPool, program_id: &str) -> Option<u64> {
+    let schema_name: Option<String> = match sqlx::query_scalar::<_, String>(
+        r#"SELECT "schema_name" FROM "programs" WHERE "program_id" = $1"#,
+    )
+    .bind(program_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(program_id, error = %e, "failed to look up schema_name for shutdown checkpoint read");
+            return None;
+        }
+    };
+
+    let schema = schema_name?;
+    let sql = format!(r#"SELECT MAX("last_slot") FROM "{schema}"."_checkpoints""#);
+    match sqlx::query_scalar::<_, Option<i64>>(&sql)
+        .fetch_one(pool)
+        .await
+    {
+        Ok(Some(s)) if s >= 0 => Some(s as u64),
+        Ok(_) => None,
+        Err(e) => {
+            warn!(program_id, schema, error = %e, "failed to read max checkpoint at shutdown");
+            None
+        }
+    }
 }
 
 async fn shutdown_signal() {

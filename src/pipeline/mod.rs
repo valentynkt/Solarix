@@ -1339,10 +1339,18 @@ pub async fn update_indexer_state(
     status: &str,
     last_slot: Option<u64>,
 ) -> Result<(), PipelineError> {
+    // GREATEST(...) is critical under Option C: when backfill writes its
+    // terminal `idle` heartbeat at end_slot, the streaming task may already
+    // have advanced last_processed_slot well past end_slot. A naive
+    // COALESCE($2, ...) would silently regress the cursor and trip "indexer
+    // rewound" alarms downstream. (Story 4.3 review patch P12.)
     let sql = r#"
         UPDATE "indexer_state"
         SET "status" = $1,
-            "last_processed_slot" = COALESCE($2, "last_processed_slot"),
+            "last_processed_slot" = CASE
+                WHEN $2::BIGINT IS NULL THEN "last_processed_slot"
+                ELSE GREATEST(COALESCE("last_processed_slot", 0), $2::BIGINT)
+            END,
             "last_heartbeat" = NOW()
         WHERE "program_id" = $3
     "#;

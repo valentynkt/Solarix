@@ -25,6 +25,9 @@ pub enum StorageError {
     #[error("write failed: {0}")]
     WriteFailed(String),
 
+    #[error("query failed: {0}")]
+    QueryFailed(String),
+
     #[error("checkpoint failed: {0}")]
     CheckpointFailed(String),
 }
