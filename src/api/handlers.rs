@@ -619,6 +619,7 @@ pub async fn query_instructions(
     resolved.push(ResolvedFilter {
         column_expr: ColumnExpr::Promoted {
             column: "instruction_name".to_string(),
+            pg_type: Some("TEXT".to_string()),
         },
         op: FilterOp::Eq,
         value: name.clone(),

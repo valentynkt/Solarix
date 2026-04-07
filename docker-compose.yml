@@ -31,6 +31,13 @@ services:
       SOLARIX_RPC_RPS: "${SOLARIX_RPC_RPS:-10}"
       SOLARIX_LOG_FORMAT: "${SOLARIX_LOG_FORMAT:-json}"
       SOLARIX_LOG_LEVEL: "${SOLARIX_LOG_LEVEL:-info}"
+      # Optional passthrough — only set if the host has them defined.
+      # `KEY:` (no value) means "use host env if present, else unset".
+      SOLANA_WS_URL:
+      SOLARIX_START_SLOT:
+      SOLARIX_END_SLOT:
+      SOLARIX_BACKFILL_CHUNK_SIZE:
+      SOLARIX_INDEX_FAILED_TXS:
     ports:
       - "3000:3000"
     healthcheck:

@@ -94,7 +94,7 @@ pub fn build_query<'a>(
 fn append_filter_clause(qb: &mut QueryBuilder<'_, Postgres>, filter: &ResolvedFilter) {
     match (&filter.column_expr, &filter.op) {
         // --- Promoted column: _in operator ---
-        (ColumnExpr::Promoted { column }, FilterOp::In) => {
+        (ColumnExpr::Promoted { column, pg_type }, FilterOp::In) => {
             let values: Vec<String> = filter
                 .value
                 .split(',')
@@ -104,16 +104,27 @@ fn append_filter_clause(qb: &mut QueryBuilder<'_, Postgres>, filter: &ResolvedFi
             if values.is_empty() {
                 qb.push("FALSE");
             } else {
-                qb.push(format!("{} = ANY(", quote_ident(column)));
+                // Always bind values as text and cast the column side to text
+                // for ANY comparison. This works for any underlying column type
+                // and avoids needing per-type binding code paths.
+                let _ = pg_type;
+                qb.push(format!("{}::text = ANY(", quote_ident(column)));
                 qb.push_bind(values);
                 qb.push(")");
             }
         }
 
         // --- Promoted column: standard comparison ---
-        (ColumnExpr::Promoted { column }, op) => {
+        (ColumnExpr::Promoted { column, pg_type }, op) => {
             qb.push(format!("{} {} ", quote_ident(column), op.as_sql()));
+            // Bind value as text, then SQL-cast to the column's PG type so the
+            // operator finds a matching signature. Without the cast, comparing
+            // a typed column (e.g. BIGINT) against a text bind triggers
+            // "operator does not exist: bigint > text" in PostgreSQL.
             qb.push_bind(filter.value.clone());
+            if let Some(t) = pg_type {
+                qb.push(format!("::{t}"));
+            }
         }
 
         // --- JSONB field: _eq / _contains use @> containment (GIN-optimized) ---
@@ -213,6 +224,7 @@ mod tests {
         let filters = vec![ResolvedFilter {
             column_expr: ColumnExpr::Promoted {
                 column: "amount".to_string(),
+                pg_type: Some("BIGINT".to_string()),
             },
             op: FilterOp::Gt,
             value: "1000".to_string(),
@@ -223,6 +235,7 @@ mod tests {
 
         assert!(sql.contains(r#"WHERE "amount" > "#));
         assert!(sql.contains("$1"));
+        assert!(sql.contains("::BIGINT"));
     }
 
     #[test]

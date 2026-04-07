@@ -65,7 +65,14 @@ pub struct ParsedFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnExpr {
     /// Field promoted to a native PostgreSQL column.
-    Promoted { column: String },
+    /// `pg_type` is the underlying PostgreSQL column type used to cast the
+    /// bound parameter (e.g. "BIGINT", "SMALLINT", "TEXT"). It is `None`
+    /// when the type is unknown — the query builder will not emit a CAST
+    /// in that case.
+    Promoted {
+        column: String,
+        pg_type: Option<String>,
+    },
     /// Field stored in the JSONB `data` column.
     Jsonb { field: String },
 }
@@ -119,18 +126,30 @@ fn extract_field_and_op(key: &str) -> (String, FilterOp) {
 
 // --- Fixed/common columns that exist on all tables regardless of IDL ---
 
-/// Common columns on the `_instructions` table.
-const INSTRUCTION_FIXED_COLUMNS: &[&str] = &[
-    "slot",
-    "signature",
-    "block_time",
-    "instruction_name",
-    "instruction_index",
-    "is_inner_ix",
+/// Common columns on the `_instructions` table mapped to their PG types.
+const INSTRUCTION_FIXED_COLUMNS: &[(&str, &str)] = &[
+    ("slot", "BIGINT"),
+    ("signature", "TEXT"),
+    ("block_time", "BIGINT"),
+    ("instruction_name", "TEXT"),
+    ("instruction_index", "SMALLINT"),
+    ("is_inner_ix", "BOOLEAN"),
 ];
 
-/// Common columns on account tables.
-const ACCOUNT_FIXED_COLUMNS: &[&str] = &["pubkey", "slot_updated", "lamports", "is_closed"];
+/// Common columns on account tables mapped to their PG types.
+const ACCOUNT_FIXED_COLUMNS: &[(&str, &str)] = &[
+    ("pubkey", "TEXT"),
+    ("slot_updated", "BIGINT"),
+    ("lamports", "BIGINT"),
+    ("is_closed", "BOOLEAN"),
+];
+
+fn fixed_column_pg_type(name: &str, columns: &[(&str, &str)]) -> Option<String> {
+    columns
+        .iter()
+        .find(|(c, _)| *c == name)
+        .map(|(_, t)| (*t).to_string())
+}
 
 /// Whether we are resolving filters for instructions or accounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +170,7 @@ pub fn resolve_filters(
     types: &[IdlTypeDef],
     context: FilterContext,
 ) -> Result<Vec<ResolvedFilter>, ApiError> {
-    let fixed_columns: &[&str] = match context {
+    let fixed_columns: &[(&str, &str)] = match context {
         FilterContext::Instructions => INSTRUCTION_FIXED_COLUMNS,
         FilterContext::Accounts => ACCOUNT_FIXED_COLUMNS,
     };
@@ -159,17 +178,20 @@ pub fn resolve_filters(
     let mut resolved = Vec::with_capacity(parsed.len());
 
     for filter in parsed {
-        let column_expr = if fixed_columns.contains(&filter.field.as_str()) {
+        let column_expr = if let Some(pg_type) = fixed_column_pg_type(&filter.field, fixed_columns)
+        {
             ColumnExpr::Promoted {
                 column: filter.field.clone(),
+                pg_type: Some(pg_type),
             }
         } else {
             // Look up field in IDL
             match fields.iter().find(|f| f.name == filter.field) {
                 Some(f) => {
-                    if map_idl_type_to_pg(&f.ty, types).is_some() {
+                    if let Some(pg_type) = map_idl_type_to_pg(&f.ty, types) {
                         ColumnExpr::Promoted {
                             column: filter.field.clone(),
+                            pg_type: Some(pg_type.to_string()),
                         }
                     } else {
                         ColumnExpr::Jsonb {
@@ -178,8 +200,10 @@ pub fn resolve_filters(
                     }
                 }
                 None => {
-                    let mut available: Vec<String> =
-                        fixed_columns.iter().map(|s| (*s).to_string()).collect();
+                    let mut available: Vec<String> = fixed_columns
+                        .iter()
+                        .map(|(c, _)| (*c).to_string())
+                        .collect();
                     available.extend(fields.iter().map(|f| f.name.clone()));
                     return Err(ApiError::InvalidFilter {
                         message: format!("Unknown field '{}'", filter.field),
@@ -386,7 +410,8 @@ mod tests {
         assert_eq!(
             resolved[0].column_expr,
             ColumnExpr::Promoted {
-                column: "amount".to_string()
+                column: "amount".to_string(),
+                pg_type: Some("BIGINT".to_string()),
             }
         );
     }
@@ -453,11 +478,11 @@ mod tests {
         assert_eq!(resolved.len(), 2);
         assert!(matches!(
             &resolved[0].column_expr,
-            ColumnExpr::Promoted { column } if column == "pubkey"
+            ColumnExpr::Promoted { column, .. } if column == "pubkey"
         ));
         assert!(matches!(
             &resolved[1].column_expr,
-            ColumnExpr::Promoted { column } if column == "slot_updated"
+            ColumnExpr::Promoted { column, .. } if column == "slot_updated"
         ));
     }
 
@@ -480,7 +505,7 @@ mod tests {
         assert_eq!(resolved.len(), 2);
         assert!(matches!(
             &resolved[0].column_expr,
-            ColumnExpr::Promoted { column } if column == "signature"
+            ColumnExpr::Promoted { column, .. } if column == "signature"
         ));
     }
 
