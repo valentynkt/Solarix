@@ -63,6 +63,20 @@ impl StorageWriter {
     ///
     /// Writes instructions, upserts accounts, and updates the checkpoint.
     /// If any operation fails, the entire transaction rolls back.
+    #[tracing::instrument(
+        name = "storage.write_block",
+        skip(self, instructions, accounts),
+        fields(
+            schema_name = schema_name,
+            stream = stream,
+            slot = slot,
+            signature = ?signature,
+            instructions_count = instructions.len(),
+            accounts_count = accounts.len(),
+        ),
+        level = "debug",
+        err(Display)
+    )]
     pub async fn write_block(
         &self,
         schema_name: &str,
@@ -100,6 +114,13 @@ impl StorageWriter {
     }
 
     /// Read the last checkpoint for a given stream.
+    #[tracing::instrument(
+        name = "storage.read_checkpoint",
+        skip(self),
+        fields(schema_name = schema_name, stream = stream),
+        level = "debug",
+        err(Display)
+    )]
     pub async fn read_checkpoint(
         &self,
         schema_name: &str,
@@ -146,6 +167,13 @@ impl StorageWriter {
 
     // --- Private: account writing with promoted column discovery ---
 
+    #[tracing::instrument(
+        name = "storage.write_accounts_inner",
+        skip(self, conn, accounts),
+        fields(schema_name = schema_name, account_count = accounts.len()),
+        level = "debug",
+        err(Display)
+    )]
     async fn write_accounts_inner(
         &self,
         conn: &mut sqlx::PgConnection,
@@ -189,6 +217,13 @@ impl StorageWriter {
         Ok(total_written)
     }
 
+    #[tracing::instrument(
+        name = "storage.get_or_discover_promoted",
+        skip(self),
+        fields(schema_name = schema_name, table_name = table_name),
+        level = "debug",
+        err(Display)
+    )]
     async fn get_or_discover_promoted(
         &self,
         schema_name: &str,
@@ -226,6 +261,13 @@ impl StorageWriter {
 // --- DB operations as free functions (keep futures Send-friendly) ---
 
 /// Batch INSERT...UNNEST for instructions with ON CONFLICT DO NOTHING dedup.
+#[tracing::instrument(
+    name = "storage.write_instructions",
+    skip(conn, instructions),
+    fields(schema_name = schema_name, count = instructions.len()),
+    level = "debug",
+    err(Display)
+)]
 async fn write_instructions(
     conn: &mut sqlx::PgConnection,
     schema_name: &str,
@@ -269,6 +311,13 @@ async fn write_instructions(
 }
 
 /// Write a batch of accounts of the same type via UNNEST upsert.
+#[tracing::instrument(
+    name = "storage.write_accounts_batch",
+    skip(conn, accounts, promoted),
+    fields(schema_name = schema_name, table_name = table_name, count = accounts.len()),
+    level = "debug",
+    err(Display)
+)]
 async fn write_accounts_batch(
     conn: &mut sqlx::PgConnection,
     schema_name: &str,
@@ -304,6 +353,13 @@ async fn write_accounts_batch(
 }
 
 /// INSERT...ON CONFLICT for checkpoint upsert.
+#[tracing::instrument(
+    name = "storage.update_checkpoint",
+    skip(conn, signature),
+    fields(schema_name = schema_name, stream = stream, slot = slot),
+    level = "debug",
+    err(Display)
+)]
 async fn update_checkpoint(
     conn: &mut sqlx::PgConnection,
     schema_name: &str,
@@ -337,6 +393,13 @@ ON CONFLICT ("stream") DO UPDATE SET
 ///
 /// Returns columns that exist in the table but are not common system columns.
 /// Uses the pool (separate connection) so it doesn't interfere with an open transaction.
+#[tracing::instrument(
+    name = "storage.discover_promoted_columns",
+    skip(pool),
+    fields(schema_name = schema_name, table_name = table_name),
+    level = "debug",
+    err(Display)
+)]
 async fn discover_promoted_columns(
     pool: &PgPool,
     schema_name: &str,

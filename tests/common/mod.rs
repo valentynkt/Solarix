@@ -12,3 +12,7 @@
 #![allow(dead_code)]
 
 pub mod decoder_fixtures;
+pub mod known_programs;
+
+#[cfg(feature = "integration")]
+pub mod postgres;

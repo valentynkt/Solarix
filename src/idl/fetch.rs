@@ -11,10 +11,34 @@ use super::IdlError;
 /// Maximum decompressed IDL size (16 MiB) to guard against zip bombs.
 const MAX_IDL_SIZE: u64 = 16 * 1024 * 1024;
 
+/// Extract a safe "host" portion from an RPC URL for structured log fields.
+///
+/// Strips scheme, credentials, and query strings so RPC tokens embedded in
+/// URLs cannot leak into logs. Story 6.1 AC1 "Sensitive field redaction".
+fn rpc_url_host(rpc_url: &str) -> String {
+    let after_scheme = rpc_url.split_once("://").map(|(_, r)| r).unwrap_or(rpc_url);
+    let without_creds = after_scheme
+        .split_once('@')
+        .map(|(_, r)| r)
+        .unwrap_or(after_scheme);
+    without_creds
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Fetch an IDL from on-chain PDA via `getAccountInfo` RPC call.
 ///
 /// Derives the IDL PDA using `["anchor:idl", program_id]` seeds, fetches the
 /// account data, then decompresses the zlib-compressed IDL JSON payload.
+#[tracing::instrument(
+    name = "idl.fetch_idl_from_chain",
+    skip(client),
+    fields(program_id = program_id, rpc_url = %rpc_url_host(rpc_url)),
+    level = "info",
+    err(Display)
+)]
 pub async fn fetch_idl_from_chain(
     client: &reqwest::Client,
     rpc_url: &str,

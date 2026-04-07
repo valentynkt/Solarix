@@ -62,6 +62,7 @@ fn sanitize_database_url(url: &str) -> String {
 }
 
 /// Initialize a database connection pool.
+#[tracing::instrument(name = "storage.init_pool", skip(config), level = "info", err(Display))]
 pub async fn init_pool(config: &Config) -> Result<PgPool, StorageError> {
     let pool = PgPoolOptions::new()
         .min_connections(config.db_pool_min)
@@ -88,6 +89,12 @@ pub async fn init_pool(config: &Config) -> Result<PgPool, StorageError> {
 }
 
 /// Create system tables (programs, indexer_state) if they don't already exist.
+#[tracing::instrument(
+    name = "storage.bootstrap_system_tables",
+    skip(pool),
+    level = "info",
+    err(Display)
+)]
 pub async fn bootstrap_system_tables(pool: &PgPool) -> Result<(), StorageError> {
     let ddl = r#"
         CREATE TABLE IF NOT EXISTS "programs" (

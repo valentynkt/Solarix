@@ -89,6 +89,13 @@ impl IdlManager {
     /// Clones `http_client` and `rpc_url` before async fetch to avoid borrowing
     /// `&mut self` across `.await` points — this ensures the returned future is
     /// `Send` when called through `Arc<RwLock<ProgramRegistry>>`.
+    #[tracing::instrument(
+        name = "idl.get_idl",
+        skip(self),
+        fields(program_id = program_id),
+        level = "debug",
+        err(Display)
+    )]
     pub async fn get_idl(&mut self, program_id: &str) -> Result<&Idl, IdlError> {
         // contains_key + index: a single `if let` borrow would conflict with
         // the mutable `self.cache.insert()` below (NLL limitation).
@@ -216,6 +223,13 @@ impl IdlManager {
     /// Returns the raw IDL JSON string and the source it was fetched from.
     /// The caller should then call `insert_fetched_idl()` under the write lock
     /// to validate, parse, and cache the result.
+    #[tracing::instrument(
+        name = "idl.fetch_idl_standalone",
+        skip(params),
+        fields(program_id = program_id),
+        level = "info",
+        err(Display)
+    )]
     pub async fn fetch_idl_standalone(
         params: &IdlFetchParams,
         program_id: &str,

@@ -83,6 +83,23 @@ would enforce it automatically require a nightly toolchain, and per
 [ADR-0002 § D4](docs/adr/0002-ci-pipeline.md) we decided not to add nightly to
 the `lint` job just for this one check. Reviewer discipline catches drift.
 
+## Logging
+
+Solarix uses `tracing` macros exclusively — never `println!` / `eprintln!`.
+Every `pub async fn` in `src/pipeline/`, `src/api/handlers.rs`, `src/idl/`,
+`src/registry.rs`, and `src/storage/writer.rs` carries `#[tracing::instrument]`
+with required field names. Every `warn!` / `error!` in the pipeline modules
+must carry `program_id` — enforced by `tests/log_levels.rs`.
+
+See [docs/operating-solarix.md](docs/operating-solarix.md#structured-logging-conventions)
+for the full field glossary, enforced rules, and `jq` recipes.
+
+When adding a new async fn in the tracing scope: add an `#[tracing::instrument]`
+attribute with an explicit `name = "..."` (dotted convention: `module.function`),
+`skip(...)` for large structs, `level = "debug"` for hot paths or `"info"` for
+lifecycle, and `err(Display)` on fallible functions. Run `cargo test --test
+instrument_coverage` and `cargo test --test log_levels` before opening a PR.
+
 ## Filing a CI failure
 
 If a CI job fails on your PR and the failure message isn't obvious:

@@ -139,6 +139,16 @@ impl ProgramRegistry {
     /// future is `'static` + `Send`. Borrowed parameters create futures with
     /// specific lifetimes that fail Rust's async Send inference in composed
     /// state machines (compiler limitation, see rust#96865).
+    #[tracing::instrument(
+        name = "registry.commit_registration",
+        skip(pool, data),
+        fields(
+            program_id = data.program_id.as_str(),
+            schema_name = data.schema_name.as_str(),
+        ),
+        level = "info",
+        err(Display)
+    )]
     pub async fn commit_registration(
         pool: PgPool,
         data: RegistrationData,
