@@ -12,6 +12,7 @@ use solarix::config::Config;
 use solarix::idl::IdlManager;
 use solarix::pipeline::update_indexer_state;
 use solarix::registry::ProgramRegistry;
+use solarix::runtime_stats::RuntimeStats;
 use solarix::storage::StorageError;
 
 /// Top-level error type so `main` can return a `Result` and let the runtime
@@ -44,9 +45,18 @@ async fn main() -> Result<(), SolarixError> {
         .unwrap_or_else(|_| config.log_level.clone().into());
 
     if config.log_format.eq_ignore_ascii_case("json") {
+        // Story 6.1 AC8: span context on close, immediate parent only
+        // (no full ancestry → bounded log size), FmtSpan::CLOSE so each
+        // instrumented function emits exactly one span-close event with
+        // its fields + `err(Display)` payload. `with_current_span` /
+        // `with_span_list` are JSON-formatter-specific, so they must come
+        // after `.json()` in the builder chain.
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
             .json()
+            .with_current_span(true)
+            .with_span_list(false)
             .init();
     } else {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
@@ -60,6 +70,11 @@ async fn main() -> Result<(), SolarixError> {
         api_port = config.api_port,
         "solarix starting"
     );
+
+    // Process-wide counters for the shutdown summary event (Story 6.1 AC6)
+    // and Story 6.2's Prometheus `/metrics` handler. Constructed once and
+    // cloned into every component that increments counters.
+    let stats = Arc::new(RuntimeStats::new());
 
     // Shared cancellation token — drives all graceful shutdown
     let cancel = CancellationToken::new();
@@ -161,6 +176,7 @@ async fn main() -> Result<(), SolarixError> {
         start_time,
         registry,
         config: config.clone(),
+        stats: Arc::clone(&stats),
     });
     let app = solarix::api::router(state);
     let listener = TcpListener::bind(&addr).await.map_err(|e| {
@@ -222,6 +238,7 @@ async fn main() -> Result<(), SolarixError> {
         let pipeline_program_id = program.program_id.clone();
         let pipeline_schema_name = program.schema_name.clone();
         let pipeline_idl = program.idl.clone();
+        let pipeline_stats = Arc::clone(&stats);
 
         let pipeline_handle = tokio::spawn(async move {
             use solarix::decoder::ChainparserDecoder;
@@ -229,7 +246,7 @@ async fn main() -> Result<(), SolarixError> {
             use solarix::pipeline::PipelineOrchestrator;
             use solarix::storage::writer::StorageWriter;
 
-            let rpc = RpcClient::new(&pipeline_config)?;
+            let rpc = RpcClient::new(&pipeline_config, Arc::clone(&pipeline_stats))?;
             let decoder: Arc<dyn solarix::decoder::SolarixDecoder> =
                 Arc::new(ChainparserDecoder::new());
             let writer = StorageWriter::new(pipeline_pool.clone());
@@ -241,6 +258,7 @@ async fn main() -> Result<(), SolarixError> {
                 writer,
                 pipeline_config,
                 pipeline_cancel,
+                pipeline_stats,
             );
 
             orch.run(&pipeline_program_id, &pipeline_schema_name, &pipeline_idl)
@@ -327,17 +345,75 @@ async fn main() -> Result<(), SolarixError> {
         initial_outcome
     };
 
+    // Snapshot totals BEFORE `graceful_shutdown` closes the pool — the
+    // helper runs after we've already flushed `indexer_state.status = stopped`
+    // so the `total_instructions` / `total_accounts` columns are final.
+    // The helper degrades to zeroes on DB errors so the summary always emits.
+    let (total_instructions_indexed, total_accounts_indexed, final_pipeline_state) =
+        read_shutdown_totals(&pool, &started_programs, &config).await;
+    let total_rpc_retries = stats.rpc_retries();
+    let total_decode_failures = stats.decode_failures();
+
     // Graceful shutdown: final indexer_state UPDATEs (with proper
     // last_processed_slot via update_indexer_state), then pool.close().
     graceful_shutdown(&pool, &started_programs, &config).await;
 
+    let outcome = if run_result.is_ok() { "clean" } else { "error" };
     info!(
         uptime_secs = start_time.elapsed().as_secs(),
-        outcome = if run_result.is_ok() { "clean" } else { "error" },
-        "shutdown complete"
+        total_instructions_indexed,
+        total_accounts_indexed,
+        total_rpc_retries,
+        total_decode_failures,
+        final_pipeline_state = %final_pipeline_state,
+        outcome,
+        "shutdown summary"
     );
 
     run_result
+}
+
+/// Read shutdown totals across started programs. On any DB error or
+/// timeout, logs a `warn!` and returns zeroes — the shutdown summary
+/// event MUST always emit. Story 6.1 AC6.
+async fn read_shutdown_totals(
+    pool: &PgPool,
+    started_programs: &[String],
+    config: &Config,
+) -> (u64, u64, String) {
+    if started_programs.is_empty() {
+        return (0, 0, "unknown".to_string());
+    }
+
+    let sql = r#"SELECT
+        COALESCE(SUM("total_instructions"), 0)::BIGINT AS total_instructions,
+        COALESCE(SUM("total_accounts"), 0)::BIGINT AS total_accounts,
+        COALESCE(MAX("status"), 'unknown') AS final_status
+        FROM "indexer_state"
+        WHERE "program_id" = ANY($1::TEXT[])"#;
+
+    let fut = sqlx::query_as::<_, (i64, i64, String)>(sql)
+        .bind(started_programs)
+        .fetch_one(pool);
+
+    match tokio::time::timeout(Duration::from_secs(config.shutdown_db_flush_secs), fut).await {
+        Ok(Ok((ti, ta, status))) => {
+            let ti_u = if ti < 0 { 0u64 } else { ti as u64 };
+            let ta_u = if ta < 0 { 0u64 } else { ta as u64 };
+            (ti_u, ta_u, status)
+        }
+        Ok(Err(e)) => {
+            warn!(error = %e, "failed to read shutdown totals from indexer_state");
+            (0, 0, "unknown".to_string())
+        }
+        Err(_) => {
+            warn!(
+                drain_secs = config.shutdown_db_flush_secs,
+                "timed out reading shutdown totals from indexer_state"
+            );
+            (0, 0, "unknown".to_string())
+        }
+    }
 }
 
 /// Registered program info loaded from DB at startup.
@@ -508,6 +584,10 @@ async fn read_max_checkpoint_slot(pool: &PgPool, program_id: &str) -> Option<u64
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
 
+    // NOTE: `pipeline.state.from` here is approximate — at the signal site
+    // the orchestrator's current state (backfilling / catching_up / streaming)
+    // is not accessible. Emitting "running" is a conscious placeholder so log
+    // scrapers always see a transition event bracketing shutdown. Story 6.1 AC2.
     #[cfg(unix)]
     {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -515,20 +595,42 @@ async fn shutdown_signal() {
             .ok();
 
         tokio::select! {
-            _ = ctrl_c => { tracing::info!("received SIGINT, shutting down"); },
+            _ = ctrl_c => {
+                info!(
+                    pipeline.state.from = "running",
+                    pipeline.state.to = "shutting_down",
+                    last_processed_slot = 0u64,
+                    reason = "sigint",
+                    "pipeline state transition"
+                );
+            },
             _ = async {
                 if let Some(ref mut s) = sigterm {
                     s.recv().await;
                 } else {
                     std::future::pending::<()>().await;
                 }
-            } => { tracing::info!("received SIGTERM, shutting down"); },
+            } => {
+                info!(
+                    pipeline.state.from = "running",
+                    pipeline.state.to = "shutting_down",
+                    last_processed_slot = 0u64,
+                    reason = "sigterm",
+                    "pipeline state transition"
+                );
+            },
         }
     }
 
     #[cfg(not(unix))]
     {
         ctrl_c.await.ok();
-        tracing::info!("received SIGINT, shutting down");
+        info!(
+            pipeline.state.from = "running",
+            pipeline.state.to = "shutting_down",
+            last_processed_slot = 0u64,
+            reason = "sigint",
+            "pipeline state transition"
+        );
     }
 }

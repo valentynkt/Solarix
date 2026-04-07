@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 // internal crate
 use super::PipelineError;
 use crate::config::Config;
+use crate::runtime_stats::RuntimeStats;
 
 // ---------------------------------------------------------------------------
 // Type aliases
@@ -243,10 +244,15 @@ pub struct RpcClient {
     retry_min_delay: Duration,
     retry_max_delay: Duration,
     retry_timeout: Duration,
+    /// Process-wide counters. Incremented on every retry attempt in the
+    /// `backon` `.notify()` callback so the shutdown summary event (Story
+    /// 6.1 AC6) and the Prometheus `/metrics` handler (Story 6.2) can both
+    /// read a single source of truth.
+    stats: Arc<RuntimeStats>,
 }
 
 impl RpcClient {
-    pub fn new(config: &Config) -> Result<Self, PipelineError> {
+    pub fn new(config: &Config, stats: Arc<RuntimeStats>) -> Result<Self, PipelineError> {
         let rps = NonZeroU32::new(config.rpc_rps)
             .ok_or_else(|| PipelineError::Fatal("rpc_rps must be > 0".into()))?;
 
@@ -265,10 +271,18 @@ impl RpcClient {
             retry_min_delay: Duration::from_millis(config.retry_initial_ms),
             retry_max_delay: Duration::from_millis(config.retry_max_ms),
             retry_timeout: Duration::from_secs(config.retry_timeout_secs),
+            stats,
         })
     }
 
     /// Send a JSON-RPC 2.0 request (single attempt, no retry).
+    #[tracing::instrument(
+        name = "rpc.send_request",
+        skip(self, params),
+        fields(method = method),
+        level = "debug",
+        err(Display)
+    )]
     async fn send_rpc_request(
         &self,
         method: &str,
@@ -325,6 +339,13 @@ impl RpcClient {
     }
 
     /// Send a JSON-RPC 2.0 request (single attempt, no retry). Returns `None` for null result.
+    #[tracing::instrument(
+        name = "rpc.send_request_optional",
+        skip(self, params),
+        fields(method = method),
+        level = "debug",
+        err(Display)
+    )]
     async fn send_rpc_request_optional(
         &self,
         method: &str,
@@ -377,6 +398,13 @@ impl RpcClient {
     }
 
     /// Send a JSON-RPC request with rate limiting and retry. Returns `None` for null result.
+    #[tracing::instrument(
+        name = "rpc.request_optional",
+        skip(self, params),
+        fields(method = method),
+        level = "debug",
+        err(Display)
+    )]
     async fn rpc_request_optional(
         &self,
         method: &str,
@@ -385,6 +413,7 @@ impl RpcClient {
         let method_owned = method.to_string();
         let method_for_log = method_owned.clone();
         let params_clone = params.clone();
+        let stats = Arc::clone(&self.stats);
 
         (|| async {
             self.rate_limiter.until_ready().await;
@@ -401,13 +430,21 @@ impl RpcClient {
                 .without_max_times(),
         )
         .when(|e: &PipelineError| e.is_retryable())
-        .notify(|err: &PipelineError, dur: Duration| {
+        .notify(move |err: &PipelineError, dur: Duration| {
+            stats.incr_rpc_retry();
             warn!(error = %err, delay = ?dur, method = %method_for_log, "retrying RPC call");
         })
         .await
     }
 
     /// Send a JSON-RPC request with rate limiting and retry.
+    #[tracing::instrument(
+        name = "rpc.request",
+        skip(self, params),
+        fields(method = method),
+        level = "debug",
+        err(Display)
+    )]
     async fn rpc_request(
         &self,
         method: &str,
@@ -416,6 +453,7 @@ impl RpcClient {
         let method_owned = method.to_string();
         let method_for_log = method_owned.clone();
         let params_clone = params.clone();
+        let stats = Arc::clone(&self.stats);
 
         (|| async {
             self.rate_limiter.until_ready().await;
@@ -432,13 +470,21 @@ impl RpcClient {
                 .without_max_times(),
         )
         .when(|e: &PipelineError| e.is_retryable())
-        .notify(|err: &PipelineError, dur: Duration| {
+        .notify(move |err: &PipelineError, dur: Duration| {
+            stats.incr_rpc_retry();
             warn!(error = %err, delay = ?dur, method = %method_for_log, "retrying RPC call");
         })
         .await
     }
     /// Fetch a single transaction by signature.
     /// Returns `None` if the transaction is not found or not yet confirmed.
+    #[tracing::instrument(
+        name = "rpc.get_transaction",
+        skip(self),
+        fields(signature = signature),
+        level = "debug",
+        err(Display)
+    )]
     pub async fn get_transaction(
         &self,
         signature: &str,
@@ -520,6 +566,13 @@ impl RpcClient {
 
 #[async_trait]
 impl BlockSource for RpcClient {
+    #[tracing::instrument(
+        name = "rpc.get_blocks",
+        skip(self),
+        fields(start_slot = start_slot, end_slot = end_slot),
+        level = "debug",
+        err(Display)
+    )]
     async fn get_blocks(&self, start_slot: u64, end_slot: u64) -> Result<Vec<u64>, PipelineError> {
         let chunks = compute_block_chunks(start_slot, end_slot);
         let mut all_slots = Vec::new();
@@ -541,6 +594,13 @@ impl BlockSource for RpcClient {
         Ok(all_slots)
     }
 
+    #[tracing::instrument(
+        name = "rpc.get_block",
+        skip(self),
+        fields(slot = slot),
+        level = "debug",
+        err(Display)
+    )]
     async fn get_block(&self, slot: u64) -> Result<Option<RpcBlock>, PipelineError> {
         let params = serde_json::json!([
             slot,
@@ -565,6 +625,7 @@ impl BlockSource for RpcClient {
         }
     }
 
+    #[tracing::instrument(name = "rpc.get_slot", skip(self), level = "debug", err(Display))]
     async fn get_slot(&self) -> Result<u64, PipelineError> {
         let params = serde_json::json!([{ "commitment": "finalized" }]);
         let value = self.rpc_request("getSlot", params).await?;
@@ -579,6 +640,13 @@ impl BlockSource for RpcClient {
 
 #[async_trait]
 impl AccountSource for RpcClient {
+    #[tracing::instrument(
+        name = "rpc.get_program_accounts",
+        skip(self),
+        fields(program_id = program_id),
+        level = "debug",
+        err(Display)
+    )]
     async fn get_program_accounts(&self, program_id: &str) -> Result<Vec<String>, PipelineError> {
         let params = serde_json::json!([
             program_id,
@@ -597,6 +665,13 @@ impl AccountSource for RpcClient {
         Ok(accounts.into_iter().map(|a| a.pubkey).collect())
     }
 
+    #[tracing::instrument(
+        name = "rpc.get_multiple_accounts",
+        skip(self, pubkeys),
+        fields(account_count = pubkeys.len()),
+        level = "debug",
+        err(Display)
+    )]
     async fn get_multiple_accounts(
         &self,
         pubkeys: &[String],

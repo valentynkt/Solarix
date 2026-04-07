@@ -57,6 +57,7 @@ fn validate_program_id(program_id: &str) -> Result<(), ApiError> {
 // Handlers
 // ---------------------------------------------------------------------------
 
+#[tracing::instrument(name = "api.health", skip(state), level = "info")]
 pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let db_ok = timeout(
         Duration::from_secs(2),
@@ -124,10 +125,21 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Val
     )
 }
 
+#[tracing::instrument(
+    name = "api.register_program",
+    skip(state, body),
+    fields(program_id = tracing::field::Empty),
+    level = "info",
+    err(Display)
+)]
 pub async fn register_program(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterProgramRequest>,
 ) -> Result<Response, ApiError> {
+    // Record program_id onto the parent span as soon as it's parsed from
+    // the body so the span is searchable before the nested `do_register`
+    // call. Story 6.1 AC1.
+    tracing::Span::current().record("program_id", body.program_id.as_str());
     let registry = Arc::clone(&state.registry);
     let pool = state.pool.clone();
     tokio::spawn(do_register(registry, pool, body))
@@ -135,6 +147,13 @@ pub async fn register_program(
         .map_err(|e| ApiError::StorageError(format!("task failed: {e}")))?
 }
 
+#[tracing::instrument(
+    name = "api.do_register",
+    skip(registry, pool, body),
+    fields(program_id = body.program_id.as_str()),
+    level = "info",
+    err(Display)
+)]
 async fn do_register(
     registry: Arc<tokio::sync::RwLock<ProgramRegistry>>,
     pool: sqlx::PgPool,
@@ -262,6 +281,7 @@ fn auto_fetch_idl(
     })
 }
 
+#[tracing::instrument(name = "api.list_programs", skip(state), level = "info", err(Display))]
 pub async fn list_programs(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let rows = sqlx::query(
         r#"SELECT "program_id", "program_name", "status", "created_at"
@@ -294,6 +314,13 @@ pub async fn list_programs(State(state): State<Arc<AppState>>) -> Result<Json<Va
     })))
 }
 
+#[tracing::instrument(
+    name = "api.get_program",
+    skip(state),
+    fields(program_id = id.as_str()),
+    level = "info",
+    err(Display)
+)]
 pub async fn get_program(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -344,6 +371,13 @@ pub async fn get_program(
     })))
 }
 
+#[tracing::instrument(
+    name = "api.delete_program",
+    skip(state, query),
+    fields(program_id = id.as_str(), drop_tables = query.drop_tables),
+    level = "info",
+    err(Display)
+)]
 pub async fn delete_program(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -510,6 +544,13 @@ fn map_query_error(e: sqlx::Error) -> ApiError {
     ApiError::QueryFailed(e.to_string())
 }
 
+#[tracing::instrument(
+    name = "api.get_schema_name",
+    skip(pool),
+    fields(program_id = program_id),
+    level = "debug",
+    err(Display)
+)]
 async fn get_schema_name(pool: &sqlx::PgPool, program_id: &str) -> Result<String, ApiError> {
     let row = sqlx::query(r#"SELECT "schema_name" FROM "programs" WHERE "program_id" = $1"#)
         .bind(program_id)
@@ -558,6 +599,13 @@ fn account_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
 // Instruction & Account query handlers
 // ---------------------------------------------------------------------------
 
+#[tracing::instrument(
+    name = "api.list_instruction_types",
+    skip(state),
+    fields(program_id = id.as_str()),
+    level = "info",
+    err(Display)
+)]
 pub async fn list_instruction_types(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -579,6 +627,13 @@ pub async fn list_instruction_types(
     })))
 }
 
+#[tracing::instrument(
+    name = "api.query_instructions",
+    skip(state, params),
+    fields(program_id = id.as_str(), instruction_name = name.as_str()),
+    level = "info",
+    err(Display)
+)]
 pub async fn query_instructions(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(String, String)>,
@@ -687,6 +742,13 @@ pub async fn query_instructions(
     })))
 }
 
+#[tracing::instrument(
+    name = "api.list_account_types",
+    skip(state),
+    fields(program_id = id.as_str()),
+    level = "info",
+    err(Display)
+)]
 pub async fn list_account_types(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -708,6 +770,13 @@ pub async fn list_account_types(
     })))
 }
 
+#[tracing::instrument(
+    name = "api.query_accounts",
+    skip(state, params),
+    fields(program_id = id.as_str(), account_type = account_type.as_str()),
+    level = "info",
+    err(Display)
+)]
 pub async fn query_accounts(
     State(state): State<Arc<AppState>>,
     Path((id, account_type)): Path<(String, String)>,
@@ -800,6 +869,17 @@ pub async fn query_accounts(
     })))
 }
 
+#[tracing::instrument(
+    name = "api.get_account",
+    skip(state),
+    fields(
+        program_id = id.as_str(),
+        account_type = account_type.as_str(),
+        pubkey = pubkey.as_str(),
+    ),
+    level = "info",
+    err(Display)
+)]
 pub async fn get_account(
     State(state): State<Arc<AppState>>,
     Path((id, account_type, pubkey)): Path<(String, String, String)>,
@@ -871,6 +951,13 @@ fn parse_optional_i64(
     }
 }
 
+#[tracing::instrument(
+    name = "api.instruction_count",
+    skip(state, params),
+    fields(program_id = id.as_str(), instruction_name = name.as_str()),
+    level = "info",
+    err(Display)
+)]
 pub async fn instruction_count(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(String, String)>,
@@ -955,6 +1042,13 @@ pub async fn instruction_count(
     })))
 }
 
+#[tracing::instrument(
+    name = "api.program_stats",
+    skip(state),
+    fields(program_id = id.as_str()),
+    level = "info",
+    err(Display)
+)]
 pub async fn program_stats(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

@@ -244,6 +244,13 @@ impl WsTransactionStream {
     /// Split out from `subscribe()` so a single `timeout()` can cover the
     /// whole handshake without needing `async move` (which would consume
     /// `&mut self` for the duration of the await).
+    #[tracing::instrument(
+        name = "ws.do_handshake",
+        skip(self),
+        fields(program_id = %program_id, subscription_id = tracing::field::Empty),
+        level = "info",
+        err(Display)
+    )]
     async fn do_handshake(&mut self, program_id: String) -> Result<(), PipelineError> {
         let (ws_stream, _response) = connect_async(&self.ws_url)
             .await
@@ -305,6 +312,11 @@ impl WsTransactionStream {
                             ))
                         })?;
                         self.subscription_id = Some(sub_id);
+                        // Record subscription_id onto the parent span so
+                        // AC1 + AC9 both see the field without double-
+                        // logging. The parent span (`do_handshake`) is
+                        // instrumented with `fields(subscription_id)`.
+                        tracing::Span::current().record("subscription_id", sub_id);
                         return Ok(());
                     }
                     // No method, no result, no error — ignore and keep
@@ -341,6 +353,13 @@ impl WsTransactionStream {
 
 #[async_trait]
 impl TransactionStream for WsTransactionStream {
+    #[tracing::instrument(
+        name = "ws.subscribe",
+        skip(self),
+        fields(program_id = program_id),
+        level = "info",
+        err(Display)
+    )]
     async fn subscribe(&mut self, program_id: &str) -> Result<(), PipelineError> {
         // Clean up any previous session so a resubscribe on the same instance
         // does not leak the prior server-side subscription or carry over stale
@@ -366,13 +385,15 @@ impl TransactionStream for WsTransactionStream {
         self.last_message_time = Instant::now();
 
         info!(
+            program_id,
             subscription_id = ?self.subscription_id,
-            "subscribed to logsNotification"
+            "ws logs subscription established"
         );
 
         Ok(())
     }
 
+    #[tracing::instrument(name = "ws.next", skip(self), level = "debug", err(Display))]
     async fn next(&mut self) -> Result<Option<StreamEvent>, PipelineError> {
         loop {
             // Replay any frames buffered during `subscribe()` first.
@@ -465,6 +486,7 @@ impl TransactionStream for WsTransactionStream {
         }
     }
 
+    #[tracing::instrument(name = "ws.unsubscribe", skip(self), level = "debug", err(Display))]
     async fn unsubscribe(&mut self) -> Result<(), PipelineError> {
         if let (Some(ws), Some(sub_id)) = (self.ws_stream.as_mut(), self.subscription_id) {
             let request = serde_json::json!({

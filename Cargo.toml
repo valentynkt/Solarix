@@ -28,6 +28,10 @@ dotenvy = "0.15"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+# HTTP tracing + request-id middleware (Story 6.1)
+tower-http = { version = "0.6", features = ["trace", "request-id"] }
+# Sortable request IDs (Story 6.1)
+uuid = { version = "1", features = ["v7"] }
 # Error handling
 thiserror = "2"
 # HTTP client
@@ -58,12 +62,32 @@ proptest = "1"
 axum-test = "16"
 tokio = { version = "1", features = ["test-util"] }
 insta = "1"
+# Story 6.1: tests/api_request_id_propagation.rs drives a Router via
+# `tower::ServiceExt::oneshot` because axum-test 16.x still targets
+# axum 0.7 while the project is on axum 0.8.
+tower = { version = "0.5", features = ["util"] }
+# Story 6.5: testcontainers async harness for integration tests.
+# `postgres` feature only — `blocking` is deliberately excluded because
+# Solarix is fully async tokio + sqlx and the SyncRunner would deadlock
+# the executor. Version verified via context7 (2026-04-07).
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# Story 6.5: in-process Solana VM for the LiteSVM pipeline test (Path A).
+# Pinned to a 0.x version that resolves cleanly against the existing
+# solana-pubkey v2 dep. Verified via context7 (2026-04-07).
+litesvm = "0.6"
 
 [features]
 # Enables tests that require external services (e.g. PostgreSQL via testcontainers).
-# Test files behind this feature are #[ignore]'d by default and are wired into a
-# real harness in Story 6.5.
+# Story 6.5 wired the harness at `tests/common/postgres.rs` and un-ignored the
+# 6.4 stubs that depended on it.
 integration = []
+# Story 6.5: gated nightly mainnet smoke test. Depends transitively on
+# `integration` because `tests/mainnet_smoke.rs` consumes
+# `tests/common/postgres.rs` (which is gated behind
+# `#[cfg(feature = "integration")]`). The literal nightly.yml command
+# `cargo test --release --features mainnet-smoke -- mainnet_smoke`
+# automatically pulls in `integration` thanks to this dependency.
+mainnet-smoke = ["integration"]
 
 [lints.rust]
 unsafe_code = "forbid"

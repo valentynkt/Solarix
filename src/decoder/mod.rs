@@ -54,6 +54,20 @@ pub enum DecodeError {
     UnsupportedType(String),
 }
 
+impl DecodeError {
+    /// Stable snake_case tag used as `error.kind` on structured log events
+    /// (Story 6.1 AC3). The match is deliberately exhaustive (no `_` arm) so
+    /// adding a new variant fails the build until this helper is updated.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            DecodeError::UnknownDiscriminator(_) => "unknown_discriminator",
+            DecodeError::DeserializationFailed(_) => "deserialization_failed",
+            DecodeError::IdlNotLoaded(_) => "idl_not_loaded",
+            DecodeError::UnsupportedType(_) => "unsupported_type",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TypeRegistry — resolves named types from IDL
 // ---------------------------------------------------------------------------
@@ -1864,5 +1878,41 @@ mod tests {
             }
             other => panic!("expected UnsupportedType, got: {other}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Story 6.1 AC3 — variant_name() contract
+    //
+    // Every DecodeError variant must map to a unique, non-empty snake_case
+    // tag used as `error.kind` on structured log events. The exhaustive match
+    // in `DecodeError::variant_name()` prevents adding a new variant without
+    // updating this helper.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decode_error_variant_name_is_unique_and_non_empty() {
+        let variants: Vec<&'static str> = vec![
+            DecodeError::UnknownDiscriminator("ff".into()).variant_name(),
+            DecodeError::DeserializationFailed("bad".into()).variant_name(),
+            DecodeError::IdlNotLoaded("prog".into()).variant_name(),
+            DecodeError::UnsupportedType("weird".into()).variant_name(),
+        ];
+
+        for name in &variants {
+            assert!(!name.is_empty(), "variant_name must not be empty");
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "variant_name must be snake_case, got: {name}"
+            );
+        }
+
+        let mut sorted = variants.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            variants.len(),
+            "variant_name values must be unique across all variants"
+        );
     }
 }
