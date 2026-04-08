@@ -151,7 +151,7 @@ jobs:
       - name: Run coverage (lib only — see ADR-0002 D6)
         run: cargo llvm-cov --release --lib --lcov --output-path lcov.info
       - name: Print coverage summary
-        run: cargo llvm-cov report --summary-only
+        run: cargo llvm-cov report --release --summary-only
       - name: Upload lcov artifact
         uses: actions/upload-artifact@v4
         with:
