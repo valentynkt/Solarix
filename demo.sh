@@ -138,7 +138,7 @@ run curl -sf \
 
 header 6 "Filter: swaps with amount_in > 0.001 SOL (1,000,000 lamports)"
 run curl -sf \
-    "$BASE_URL/api/programs/$PROGRAM_ID/instructions/$INSTRUCTION_NAME?filter=data.amount_in_gt=1000000&limit=5" | jq .
+    "$BASE_URL/api/programs/$PROGRAM_ID/instructions/$INSTRUCTION_NAME?data.amount_in_gt=1000000&limit=5" | jq .
 
 header 7 "List account types in IDL"
 run curl -sf "$BASE_URL/api/programs/$PROGRAM_ID/accounts" | jq .

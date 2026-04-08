@@ -232,7 +232,7 @@ For the full architecture deep-dive, see [docs/architecture.md](docs/architectur
    curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?limit=5" | jq
 
    # Filter: swaps where amount_in > 0.001 SOL (1,000,000 lamports)
-   curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?filter=data.amount_in_gt=1000000&limit=10" | jq
+   curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?data.amount_in_gt=1000000&limit=10" | jq
 
    # Time-series swap count by hour
    curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap/count?interval=hour" | jq
@@ -338,7 +338,7 @@ curl -s http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9Yu
 curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?limit=5" | jq
 
 # Filter: swaps with amount_in > 0.001 SOL
-curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?filter=data.amount_in_gt=1000000&limit=10" | jq
+curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?data.amount_in_gt=1000000&limit=10" | jq
 
 # Time-series count by hour
 curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap/count?interval=hour" | jq
@@ -378,19 +378,19 @@ curl -s http://localhost:3000/metrics | grep "^solarix_"
 
 ### Filter Syntax
 
-Append `?filter=` to any instruction or account query endpoint:
+Filters are appended as query parameters directly to any instruction or account query endpoint:
 
 ```bash
-?filter=data.amount_gt=1000000             # JSONB field, greater than
-?filter=data.authority_eq=So11111111111111111111111111111111111111112   # equals (full address)
-?filter=data.is_active_eq=true             # boolean
-?filter=slot_gt=300000000                  # promoted BIGINT column (no "data." prefix)
+?data.amount_gt=1000000             # JSONB field, greater than
+?data.authority_eq=So11111111111111111111111111111111111111112   # equals (full address)
+?data.is_active_eq=true             # boolean
+?slot_gt=300000000                  # promoted BIGINT column (no "data." prefix)
 ```
 
 Combine multiple filters with `&`:
 
 ```bash
-?filter=data.amount_in_gt=1000000&filter=data.min_amount_out_lt=5000000000
+?data.amount_in_gt=1000000&data.min_amount_out_lt=5000000000
 ```
 
 | Operator    | Meaning                                                                        |
@@ -416,7 +416,7 @@ Combine multiple filters with `&`:
 All errors return structured JSON:
 
 ```bash
-curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?filter=nonexistent_gt=1" | jq
+curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?nonexistent_gt=1" | jq
 ```
 
 ```json
@@ -565,6 +565,18 @@ All outbound RPC calls pass through an async-native Generic Cell Rate Algorithm 
 _Alternatives:_ `sleep`-based throttle blocks the Tokio executor and wastes wall time; no rate limit causes 429 storms on public endpoints that corrupt backfill progress.
 
 _Why:_ `governor` is fully async (no blocking), precise, and handles the ~10 RPS public Solana RPC limit with configurable burst tolerance.
+
+---
+
+**Sprint-4 integration testing fixed three critical bugs**
+
+Real end-to-end testing against mainnet surfaced issues that 257 unit tests had not caught:
+
+- **IDL PDA derivation** used `find_program_address` — Anchor v0.30 uses `create_with_seed` from a program signer. Fixed in commit `99567f2`. Regression test: `test_idl_address_derivation_matches_anchor_v030`.
+- **`programs.idl_json` not persisted** — the IDL was stored in memory but not written to the database, so the pipeline never auto-restarted after a container restart. Fixed in commit `797bf74`. Regression test: `test_idl_json_persisted_and_loaded_on_restart`.
+- **BIGINT filter cast** — promoted-column SQL filters were bound as TEXT. PostgreSQL rejected `bigint > text` at runtime. Fixed in commit `243a0de`. Regression test: `test_slot_gt_filter_uses_bigint_cast`.
+
+All three have regression tests in `tests/regression_e2e_sprint4.rs` and run on every CI push.
 
 ---
 
