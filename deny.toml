@@ -28,8 +28,24 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # This catches the `backoff` RUSTSEC-2025-0012 unmaintained advisory that
 # motivated this whole CI story — under v2 the unmaintained class is no
 # longer a separate warn/deny knob, it just fails like everything else.
-yanked = "deny"
-ignore = []
+#
+# `yanked` is warn rather than deny: fastrand 2.4.0 is yanked and comes in
+# through backon + proptest; upgrading requires upstream action.
+yanked = "warn"
+ignore = [
+  # --- Transitive deps via litesvm (Solana ecosystem) — no upgrade path ---
+  "RUSTSEC-2024-0344", # curve25519-dalek 3.2.0 timing sidechannel
+  "RUSTSEC-2022-0093", # ed25519-dalek 1.0.1 double-public-key signing oracle
+  "RUSTSEC-2021-0139", # ansi_term 0.12.1 unmaintained
+  "RUSTSEC-2024-0375", # atty 0.2.14 unmaintained
+  "RUSTSEC-2021-0145", # atty 0.2.14 unsound (unaligned read)
+  "RUSTSEC-2025-0141", # bincode 1.3.3 unmaintained
+  "RUSTSEC-2024-0388", # derivative 2.2.0 unmaintained
+  "RUSTSEC-2024-0436", # paste 1.0.15 unmaintained
+  "RUSTSEC-2025-0134", # rustls-pemfile 1.0.4 unmaintained
+  # --- Via sqlx-mysql (sqlx macros crate pulls mysql unconditionally) ---
+  "RUSTSEC-2023-0071", # rsa 0.9.10 Marvin attack — no upstream fix available
+]
 
 [licenses]
 version = 2
