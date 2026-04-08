@@ -11,7 +11,12 @@ set -euo pipefail
 # =============================================================================
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
-PROGRAM_ID="JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+# Meteora DLMM — verified end-to-end in the Sprint-4 e2e gate (199 swaps in 5 min).
+# `swap` is the highest-volume instruction; `lbpair` is the primary account type.
+# Override with PROGRAM_ID=... INSTRUCTION_NAME=... ACCOUNT_TYPE=... if needed.
+PROGRAM_ID="${PROGRAM_ID:-LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo}"
+INSTRUCTION_NAME="${INSTRUCTION_NAME:-swap}"
+ACCOUNT_TYPE="${ACCOUNT_TYPE:-lbpair}"
 DRY_RUN="${DEMO_DRY_RUN:-0}"
 
 # ---------------------------------------------------------------------------
@@ -28,7 +33,9 @@ success() {
 
 run() {
     if [ "$DRY_RUN" = "1" ]; then
-        echo "  DRY: $*"
+        # Print to stderr so the dry message does not pollute downstream pipes
+        # (e.g. `run curl ... | jq .` would otherwise feed the echo string to jq).
+        echo "  DRY: $*" >&2
     else
         "$@"
     fi
@@ -43,9 +50,13 @@ check_dep() {
 
 poll_health() {
     local max=$1
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "  DRY: poll /health until status==healthy (max ${max} attempts)"
+        return 0
+    fi
     local i=0
     printf "Waiting for health endpoint"
-    until run curl -sf "$BASE_URL/health" | jq -e '.status == "ok"' >/dev/null 2>&1; do
+    until curl -sf "$BASE_URL/health" | jq -e '.status == "healthy"' >/dev/null 2>&1; do
         i=$((i + 1))
         if [ "$i" -gt "$max" ]; then
             echo ""
@@ -60,9 +71,13 @@ poll_health() {
 
 poll_stats() {
     local max=$1
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "  DRY: poll /stats until total_instructions>0 (max ${max} attempts)"
+        return 0
+    fi
     local i=0
     printf "Waiting for first indexed instructions"
-    until run curl -sf "$BASE_URL/api/programs/$PROGRAM_ID/stats" |
+    until curl -sf "$BASE_URL/api/programs/$PROGRAM_ID/stats" |
         jq -e '.data.total_instructions > 0' >/dev/null 2>&1; do
         i=$((i + 1))
         if [ "$i" -gt "$max" ]; then
@@ -92,7 +107,7 @@ header 1 "Start the stack"
 run docker compose up --build -d
 poll_health 60
 
-header 2 "Register Jupiter V6"
+header 2 "Register Meteora DLMM"
 run curl -sf -X POST "$BASE_URL/api/programs" \
     -H "Content-Type: application/json" \
     -d "{\"program_id\":\"$PROGRAM_ID\"}" | jq .
@@ -100,7 +115,7 @@ run curl -sf -X POST "$BASE_URL/api/programs" \
 # Verify schema was created
 if [ "$DRY_RUN" != "1" ]; then
     STATUS=$(curl -sf "$BASE_URL/api/programs/$PROGRAM_ID" | jq -r '.data.status')
-    if [ "$STATUS" != "schema_created" ] && [ "$STATUS" != "indexing" ]; then
+    if [ "$STATUS" != "schema_created" ]; then
         echo "Unexpected registration status: $STATUS"
         exit 1
     fi
@@ -119,30 +134,34 @@ run curl -sf "$BASE_URL/api/programs/$PROGRAM_ID/stats" | jq .
 
 header 5 "Query decoded swap instructions"
 run curl -sf \
-    "$BASE_URL/api/programs/$PROGRAM_ID/instructions/route?limit=3" | jq .
+    "$BASE_URL/api/programs/$PROGRAM_ID/instructions/$INSTRUCTION_NAME?limit=3" | jq .
 
-header 6 "Filter: swaps with in_amount > 1 SOL"
+header 6 "Filter: swaps with amount_in > 0.001 SOL (1,000,000 lamports)"
 run curl -sf \
-    "$BASE_URL/api/programs/$PROGRAM_ID/instructions/route?filter=data.in_amount_gt=1000000000&limit=5" | jq .
+    "$BASE_URL/api/programs/$PROGRAM_ID/instructions/$INSTRUCTION_NAME?filter=data.amount_in_gt=1000000&limit=5" | jq .
 
-header 7 "List account types"
+header 7 "List account types in IDL"
 run curl -sf "$BASE_URL/api/programs/$PROGRAM_ID/accounts" | jq .
 
 header 8 "Time-series aggregation (swap count by hour)"
 run curl -sf \
-    "$BASE_URL/api/programs/$PROGRAM_ID/instructions/route/count?interval=hour" | jq .
+    "$BASE_URL/api/programs/$PROGRAM_ID/instructions/$INSTRUCTION_NAME/count?interval=hour" | jq .
 
 header 9 "Restart Solarix and verify checkpoint recovery"
 run docker compose stop solarix
 run docker compose start solarix
 poll_health 30
-LAST_SLOT=$(run curl -sf "$BASE_URL/api/programs/$PROGRAM_ID/stats" |
-    jq '.data.last_processed_slot')
-if [ "$DRY_RUN" != "1" ] && [ "$LAST_SLOT" = "null" ] || [ "${LAST_SLOT:-0}" -le 0 ]; then
-    echo "Checkpoint recovery check failed: last_processed_slot=$LAST_SLOT"
-    exit 1
+if [ "$DRY_RUN" = "1" ]; then
+    echo "  DRY: curl /stats and assert last_processed_slot > 0"
+else
+    LAST_SLOT=$(curl -sf "$BASE_URL/api/programs/$PROGRAM_ID/stats" |
+        jq '.data.last_processed_slot')
+    if [ "$LAST_SLOT" = "null" ] || [ "${LAST_SLOT:-0}" -le 0 ]; then
+        echo "Checkpoint recovery check failed: last_processed_slot=$LAST_SLOT"
+        exit 1
+    fi
+    echo "Checkpoint resumed at slot $LAST_SLOT"
 fi
-echo "Checkpoint resumed at slot $LAST_SLOT"
 
 header 10 "Final health check"
 run curl -sf "$BASE_URL/health" | jq .

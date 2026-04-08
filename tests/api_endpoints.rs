@@ -133,7 +133,10 @@ mod register_program {
             assert_eq!(status, axum::http::StatusCode::CREATED);
             assert_success_envelope(&body);
             assert_eq!(body["data"]["program_id"], PROGRAM_ID);
-            assert_eq!(body["data"]["status"], "registered");
+            // Contract pin: the register response must match the DB value.
+            // `commit_registration` runs synchronously so by the time 201 is
+            // returned, `programs.status` is already `schema_created`.
+            assert_eq!(body["data"]["status"], "schema_created");
             assert!(body["data"]["idl_source"].is_string());
             assert!(body["meta"]["message"].is_string());
 

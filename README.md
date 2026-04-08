@@ -6,7 +6,7 @@
 Solarix is a universal Solana indexer built in Rust. Give it any Anchor program ID and it fetches the IDL directly from the blockchain, generates a typed PostgreSQL schema at runtime — no codegen, no recompile, no redeploy — then begins indexing transactions and account states through a concurrent backfill-plus-streaming pipeline. Decoded data is immediately queryable through a 13-endpoint REST API with typed filters, cursor pagination, and time-series aggregations. Built for the [Superteam Ukraine bounty](https://earn.superteam.fun/) (Middle level, 500 USDG).
 
 ```
-POST /api/programs  { "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4" }
+POST /api/programs  { "program_id": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo" }
 
     Solarix:  fetch IDL on-chain  -->  CREATE SCHEMA + TABLES  -->  backfill + stream  -->  query API ready
 ```
@@ -97,9 +97,10 @@ public/
   programs          -- program registry (program_id, schema_name, idl_hash, status)
   indexer_state     -- per-program pipeline state (last_slot, status, counters)
 
-{program_name}_{program_id_prefix}/        -- e.g. jupiter_jup6lkbz/
-  pool              -- one table per account type, upsert on pubkey
-  token_ledger      -- (promoted typed columns + JSONB data column)
+{program_name}_{program_id_prefix}/        -- e.g. lb_clmm_lbuzkhrx/
+  lbpair            -- one table per account type, upsert on pubkey
+  position          -- (promoted typed columns + JSONB data column)
+  binarray
   ...
   _instructions     -- all decoded instructions (append-only)
   _checkpoints      -- slot cursor per stream (backfill, stream)
@@ -195,28 +196,28 @@ For the full architecture deep-dive, see [docs/architecture.md](docs/architectur
    curl -s http://localhost:3000/health | jq
    ```
 
-3. Register a program — Solarix fetches the IDL on-chain, creates the schema, and starts indexing:
+3. Register a program — Solarix fetches the IDL on-chain, creates the schema, and starts indexing. The example below uses **Meteora DLMM** because it has rich on-chain activity and was verified end-to-end during the Sprint-4 e2e gate (199 swaps indexed in 5 minutes):
 
    ```bash
    curl -s -X POST http://localhost:3000/api/programs \
      -H "Content-Type: application/json" \
-     -d '{"program_id":"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"}' | jq
+     -d '{"program_id":"LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"}' | jq
    ```
 
    ```json
    {
      "data": {
-       "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-       "status": "registered",
+       "program_id": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+       "status": "schema_created",
        "idl_source": "onchain"
      },
      "meta": {
-       "message": "Program registered. Indexing will begin shortly."
+       "message": "Program registered. Indexing will begin on next restart."
      }
    }
    ```
 
-   Once the schema is created (within seconds), `GET /api/programs/{id}` returns `"status": "schema_created"` with `"schema_name": "jupiter_jup6lkbz"`.
+   The schema is generated synchronously during the request. `GET /api/programs/{id}` will return the same `"status": "schema_created"` immediately after, along with `"schema_name": "lb_clmm_lbuzkhrx"`.
 
    Restart the service so the pipeline auto-starts for the registered program:
 
@@ -228,16 +229,16 @@ For the full architecture deep-dive, see [docs/architecture.md](docs/architectur
 
    ```bash
    # Decoded swap instructions (cursor-paginated)
-   curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?limit=5" | jq
+   curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?limit=5" | jq
 
-   # Filter: swaps where in_amount > 1 SOL (1,000,000,000 lamports)
-   curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?filter=data.in_amount_gt=1000000000&limit=10" | jq
+   # Filter: swaps where amount_in > 0.001 SOL (1,000,000 lamports)
+   curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?filter=data.amount_in_gt=1000000&limit=10" | jq
 
    # Time-series swap count by hour
-   curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route/count?interval=hour" | jq
+   curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap/count?interval=hour" | jq
 
    # Indexing statistics
-   curl -s http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/stats | jq
+   curl -s http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/stats | jq
    ```
 
 5. Run the automated end-to-end demo:
@@ -299,21 +300,21 @@ Base URL: `http://localhost:3000`
 # Register a program
 curl -s -X POST http://localhost:3000/api/programs \
   -H "Content-Type: application/json" \
-  -d '{"program_id":"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"}' | jq
+  -d '{"program_id":"LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"}' | jq
 # {
 #   "data": {
-#     "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-#     "status": "registered",
+#     "program_id": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+#     "status": "schema_created",
 #     "idl_source": "onchain"
 #   },
-#   "meta": { "message": "Program registered. Indexing will begin shortly." }
+#   "meta": { "message": "Program registered. Indexing will begin on next restart." }
 # }
 
 # Indexing statistics
-curl -s http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/stats | jq
+curl -s http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/stats | jq
 # {
 #   "data": {
-#     "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+#     "program_id": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
 #     "total_instructions": 142831,
 #     "total_accounts": 9204,
 #     "last_processed_slot": 318472910
@@ -334,19 +335,19 @@ curl -s http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QN
 
 ```bash
 # Query decoded swap instructions (cursor pagination)
-curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?limit=5" | jq
+curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?limit=5" | jq
 
-# Filter: swaps with in_amount > 1 SOL
-curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?filter=data.in_amount_gt=1000000000&limit=10" | jq
+# Filter: swaps with amount_in > 0.001 SOL
+curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?filter=data.amount_in_gt=1000000&limit=10" | jq
 
 # Time-series count by hour
-curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route/count?interval=hour" | jq
+curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap/count?interval=hour" | jq
 
 # List account types
-curl -s http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/accounts | jq
+curl -s http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/accounts | jq
 
 # Query accounts with offset pagination
-curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/accounts/TokenLedger?limit=5&offset=0" | jq
+curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/accounts/lbpair?limit=5&offset=0" | jq
 ```
 
 ### Observability
@@ -364,8 +365,8 @@ curl -s http://localhost:3000/health | jq
 #   "database": "connected",
 #   "programs": [
 #     {
-#       "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-#       "pipeline_status": "indexing",
+#       "program_id": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+#       "status": "streaming",
 #       "last_processed_slot": 318472910
 #     }
 #   ]
@@ -389,19 +390,19 @@ Append `?filter=` to any instruction or account query endpoint:
 Combine multiple filters with `&`:
 
 ```bash
-?filter=data.in_amount_gt=1000000000&filter=data.out_amount_lt=5000000000
+?filter=data.amount_in_gt=1000000&filter=data.min_amount_out_lt=5000000000
 ```
 
-| Operator | Meaning                   |
-| -------- | ------------------------- |
-| `_eq`    | Equals                    |
-| `_neq`   | Not equals                |
-| `_gt`    | Greater than              |
-| `_gte`   | Greater than or equal     |
-| `_lt`    | Less than                 |
-| `_lte`   | Less than or equal        |
-| `_in`    | In list (comma-separated) |
-| `_like`  | SQL LIKE pattern          |
+| Operator    | Meaning                                                                        |
+| ----------- | ------------------------------------------------------------------------------ |
+| `_eq`       | Equals                                                                         |
+| `_ne`       | Not equals                                                                     |
+| `_gt`       | Greater than                                                                   |
+| `_gte`      | Greater than or equal                                                          |
+| `_lt`       | Less than                                                                      |
+| `_lte`      | Less than or equal                                                             |
+| `_in`       | In list (comma-separated)                                                      |
+| `_contains` | JSONB containment (`@>`) — matches rows whose JSON value contains the argument |
 
 ### Pagination
 
@@ -415,15 +416,15 @@ Combine multiple filters with `&`:
 All errors return structured JSON:
 
 ```bash
-curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?filter=nonexistent_gt=1" | jq
+curl -s "http://localhost:3000/api/programs/LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo/instructions/swap?filter=nonexistent_gt=1" | jq
 ```
 
 ```json
 {
   "error": {
     "code": "INVALID_FILTER",
-    "message": "Unknown field 'nonexistent'. Available: in_amount, out_amount, ...",
-    "available_fields": ["in_amount", "out_amount", "slippage_bps"]
+    "message": "Unknown field 'nonexistent'. Available: amount_in, min_amount_out, ...",
+    "available_fields": ["amount_in", "min_amount_out"]
   }
 }
 ```
@@ -564,20 +565,6 @@ All outbound RPC calls pass through an async-native Generic Cell Rate Algorithm 
 _Alternatives:_ `sleep`-based throttle blocks the Tokio executor and wastes wall time; no rate limit causes 429 storms on public endpoints that corrupt backfill progress.
 
 _Why:_ `governor` is fully async (no blocking), precise, and handles the ~10 RPS public Solana RPC limit with configurable burst tolerance.
-
----
-
-**Sprint-4 integration testing found and fixed three critical bugs**
-
-Real end-to-end testing against mainnet surfaced issues that 257 unit tests had not caught:
-
-1. **IDL PDA derivation** — used `find_program_address` but Anchor v0.30 derives the IDL account with `create_with_seed` from a program signer. Fixed in commit `99567f2`. Regression test: `test_idl_address_derivation_matches_anchor_v030`.
-
-2. **`programs.idl_json` not persisted** — the IDL was stored in memory but not written to the database, so the pipeline never auto-restarted after a container restart. Fixed in commit `797bf74`. Regression test: `test_idl_json_persisted_and_loaded_on_restart`.
-
-3. **BIGINT filter cast** — promoted-column SQL filters were bound as TEXT parameters. PostgreSQL rejected `bigint > text` at runtime with an operator-does-not-exist error. Fixed in commit `243a0de`. Regression test: `test_slot_gt_filter_uses_bigint_cast`.
-
-All three bugs have regression tests in `tests/regression_e2e_sprint4.rs` and are part of the integration test suite that runs on every CI push.
 
 ---
 

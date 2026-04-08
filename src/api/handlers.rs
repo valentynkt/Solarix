@@ -197,16 +197,21 @@ async fn do_register(
         "program registered via API"
     );
 
+    // Return the actual DB status. `commit_registration` runs synchronously
+    // to completion before this point, so by the time the 201 is emitted the
+    // `programs.status` row is already `schema_created`. Returning an inline
+    // "registered" here would contradict what `GET /api/programs/{id}` sees
+    // on the same program moments later.
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "data": {
                 "program_id": program_info.program_id,
-                "status": "registered",
+                "status": "schema_created",
                 "idl_source": program_info.idl_source,
             },
             "meta": {
-                "message": "Program registered. Indexing will begin shortly."
+                "message": "Program registered. Indexing will begin on next restart."
             }
         })),
     )

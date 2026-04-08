@@ -16,16 +16,16 @@ For the structured log field glossary, jq recipes, and full observability refere
 curl -s http://localhost:3000/health | jq
 ```
 
-Healthy response (program registered and indexing):
+Healthy response (program registered with an active streaming pipeline):
 
 ```json
 {
-  "status": "ok",
+  "status": "healthy",
   "database": "connected",
   "programs": [
     {
-      "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
-      "pipeline_status": "indexing",
+      "program_id": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "status": "streaming",
       "last_processed_slot": 318472910
     }
   ]
@@ -36,7 +36,7 @@ Not yet registered (programs array is empty):
 
 ```json
 {
-  "status": "ok",
+  "status": "healthy",
   "database": "connected",
   "programs": []
 }
@@ -48,7 +48,7 @@ Not yet registered (programs array is empty):
 docker compose restart solarix
 ```
 
-The pipeline status transitions: `schema_created` → `indexing` once the pipeline starts after restart. If the database shows `"disconnected"`, check `DATABASE_URL` and whether PostgreSQL is reachable.
+After restart, the per-program `status` in the `/health` response transitions through the `indexer_state` state machine: `backfilling` → `streaming` (with `catching_up` on WebSocket disconnects). The top-level `programs.status` row stays at `schema_created` once the schema has been generated — it only changes to `error` on a schema-gen failure or `stopped` on graceful shutdown. If the top-level `database` field shows `"disconnected"`, check `DATABASE_URL` and whether PostgreSQL is reachable.
 
 ---
 
@@ -78,7 +78,7 @@ For sustained high-throughput backfill, switch to a paid RPC endpoint that allow
 
 ## Scenario 3 — IDL Fetch Failure
 
-**Symptoms:** A program stays at `schema_created` and never transitions to `indexing`. Logs show an `IdlError::NotFound` or `error_kind = "not_found"`.
+**Symptoms:** `POST /api/programs` returns a 422 `IDL_ERROR` instead of a 201, or registration via the fetch cascade fails with an `IdlError::NotFound`. Logs show `error_kind = "not_found"`.
 
 **Diagnosis:**
 
@@ -146,7 +146,7 @@ curl -sv "http://localhost:3000/api/programs/<ID>/instructions/<name>?filter=slo
 **Fix:**
 
 - **BIGINT promoted columns** (e.g. `slot`, `lamports`) are queried directly by column name: `slot_gt=100`. Do **not** prefix them with `data.` — that path uses lexicographic TEXT comparison inside JSONB, which produces incorrect results for numeric ranges.
-- **JSONB fields** use the `data.` prefix: `data.in_amount_gt=1000000000`.
+- **JSONB fields** use the `data.` prefix: `data.amount_in_gt=1000000`.
 - Check the `INVALID_FILTER` error body for the `available_fields` list to find the correct field names.
 
 See the filter syntax reference in [README.md § Filter Syntax](../README.md#filter-syntax).

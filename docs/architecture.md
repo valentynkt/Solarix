@@ -184,16 +184,16 @@ Each registered program gets its own PostgreSQL schema:
   └─────────────────────────────────────────────────────────────┘
 
   ┌─────────────────────────────────────────────────────────────┐
-  │ jupiter_v6_jup6lkmu schema   (one schema per program)      │
+  │ lb_clmm_lbuzkhrx schema    (one schema per program)        │
   │                                                             │
-  │  pool (account table)      token_ledger (account table)     │
+  │  lbpair (account table)    position (account table)         │
   │  ┌──────────────────┐      ┌──────────────────┐            │
   │  │ pubkey (PK)      │      │ pubkey (PK)      │            │
   │  │ slot_updated     │      │ slot_updated     │            │
   │  │ lamports         │      │ lamports         │            │
   │  │ data (JSONB)     │      │ data (JSONB)     │            │
-  │  │ token_a_mint     │      │ owner            │   ...      │
-  │  │ fee_rate         │      │ balance          │            │
+  │  │ token_x_mint     │      │ owner            │   ...      │
+  │  │ bin_step         │      │ lower_bin_id     │            │
   │  └──────────────────┘      └──────────────────┘            │
   │                                                             │
   │  _instructions (append-only)    _checkpoints    _metadata   │
