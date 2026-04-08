@@ -42,7 +42,13 @@ Not yet registered (programs array is empty):
 }
 ```
 
-**Fix:** If `programs` is empty, register a program with `POST /api/programs`. The pipeline status transitions: `schema_created` → `indexing` once the pipeline starts. If the database shows `"disconnected"`, check `DATABASE_URL` and whether PostgreSQL is reachable.
+**Fix:** If `programs` is empty, register a program with `POST /api/programs`, then restart the service so the pipeline auto-starts:
+
+```bash
+docker compose restart solarix
+```
+
+The pipeline status transitions: `schema_created` → `indexing` once the pipeline starts after restart. If the database shows `"disconnected"`, check `DATABASE_URL` and whether PostgreSQL is reachable.
 
 ---
 

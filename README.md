@@ -97,7 +97,7 @@ public/
   programs          -- program registry (program_id, schema_name, idl_hash, status)
   indexer_state     -- per-program pipeline state (last_slot, status, counters)
 
-{program_name}_{program_id_prefix}/        -- e.g. jupiter_v6_jup6lkmu/
+{program_name}_{program_id_prefix}/        -- e.g. jupiter_jup6lkbz/
   pool              -- one table per account type, upsert on pubkey
   token_ledger      -- (promoted typed columns + JSONB data column)
   ...
@@ -207,13 +207,24 @@ For the full architecture deep-dive, see [docs/architecture.md](docs/architectur
    {
      "data": {
        "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-       "status": "schema_created",
-       "schema_name": "jupiter_v6_jup6lkmu"
+       "status": "registered",
+       "idl_source": "onchain"
+     },
+     "meta": {
+       "message": "Program registered. Indexing will begin shortly."
      }
    }
    ```
 
-4. Query decoded data once indexing begins:
+   Once the schema is created (within seconds), `GET /api/programs/{id}` returns `"status": "schema_created"` with `"schema_name": "jupiter_jup6lkbz"`.
+
+   Restart the service so the pipeline auto-starts for the registered program:
+
+   ```bash
+   docker compose restart solarix
+   ```
+
+4. Query decoded data once indexing begins (allow a minute for the first slot to appear):
 
    ```bash
    # Decoded swap instructions (cursor-paginated)
@@ -292,9 +303,10 @@ curl -s -X POST http://localhost:3000/api/programs \
 # {
 #   "data": {
 #     "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-#     "status": "schema_created",
-#     "schema_name": "jupiter_v6_jup6lkmu"
-#   }
+#     "status": "registered",
+#     "idl_source": "onchain"
+#   },
+#   "meta": { "message": "Program registered. Indexing will begin shortly." }
 # }
 
 # Indexing statistics
@@ -552,6 +564,20 @@ All outbound RPC calls pass through an async-native Generic Cell Rate Algorithm 
 _Alternatives:_ `sleep`-based throttle blocks the Tokio executor and wastes wall time; no rate limit causes 429 storms on public endpoints that corrupt backfill progress.
 
 _Why:_ `governor` is fully async (no blocking), precise, and handles the ~10 RPS public Solana RPC limit with configurable burst tolerance.
+
+---
+
+**Sprint-4 integration testing found and fixed three critical bugs**
+
+Real end-to-end testing against mainnet surfaced issues that 257 unit tests had not caught:
+
+1. **IDL PDA derivation** — used `find_program_address` but Anchor v0.30 derives the IDL account with `create_with_seed` from a program signer. Fixed in commit `99567f2`. Regression test: `test_idl_address_derivation_matches_anchor_v030`.
+
+2. **`programs.idl_json` not persisted** — the IDL was stored in memory but not written to the database, so the pipeline never auto-restarted after a container restart. Fixed in commit `797bf74`. Regression test: `test_idl_json_persisted_and_loaded_on_restart`.
+
+3. **BIGINT filter cast** — promoted-column SQL filters were bound as TEXT parameters. PostgreSQL rejected `bigint > text` at runtime with an operator-does-not-exist error. Fixed in commit `243a0de`. Regression test: `test_slot_gt_filter_uses_bigint_cast`.
+
+All three bugs have regression tests in `tests/regression_e2e_sprint4.rs` and are part of the integration test suite that runs on every CI push.
 
 ---
 

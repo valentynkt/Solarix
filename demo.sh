@@ -106,7 +106,11 @@ if [ "$DRY_RUN" != "1" ]; then
     fi
 fi
 
-header 3 "Inspect program details"
+header 3 "Restart to start the indexing pipeline"
+# The pipeline auto-starts for registered programs on restart.
+# Registration saves the IDL to the DB; restart picks it up and begins indexing.
+run docker compose restart solarix
+poll_health 30
 run curl -sf "$BASE_URL/api/programs/$PROGRAM_ID" | jq .
 
 header 4 "Wait for first indexed instructions"
