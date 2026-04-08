@@ -135,6 +135,7 @@ pub fn decide_initial_state(
 // ---------------------------------------------------------------------------
 
 /// Distinguishes recoverable disconnects from fatal errors in the streaming loop.
+#[derive(Debug)]
 enum StreamInterrupt {
     /// WebSocket disconnected; last known slot provided for gap detection.
     Disconnect(u64),
@@ -1160,6 +1161,7 @@ impl PipelineOrchestrator {
         skip(self, stream, idl),
         fields(program_id = program_id, schema_name = schema_name),
         level = "debug",
+        err(Debug)
     )]
     async fn stream_events(
         &self,
