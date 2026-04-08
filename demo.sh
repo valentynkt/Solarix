@@ -11,7 +11,7 @@ set -euo pipefail
 # =============================================================================
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
-PROGRAM_ID="JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL"
+PROGRAM_ID="JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 DRY_RUN="${DEMO_DRY_RUN:-0}"
 
 # ---------------------------------------------------------------------------

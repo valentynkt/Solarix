@@ -6,7 +6,7 @@
 Solarix is a universal Solana indexer built in Rust. Give it any Anchor program ID and it fetches the IDL directly from the blockchain, generates a typed PostgreSQL schema at runtime — no codegen, no recompile, no redeploy — then begins indexing transactions and account states through a concurrent backfill-plus-streaming pipeline. Decoded data is immediately queryable through a 13-endpoint REST API with typed filters, cursor pagination, and time-series aggregations. Built for the [Superteam Ukraine bounty](https://earn.superteam.fun/) (Middle level, 500 USDG).
 
 ```
-POST /api/programs  { "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL" }
+POST /api/programs  { "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4" }
 
     Solarix:  fetch IDL on-chain  -->  CREATE SCHEMA + TABLES  -->  backfill + stream  -->  query API ready
 ```
@@ -200,13 +200,13 @@ For the full architecture deep-dive, see [docs/architecture.md](docs/architectur
    ```bash
    curl -s -X POST http://localhost:3000/api/programs \
      -H "Content-Type: application/json" \
-     -d '{"program_id":"JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL"}' | jq
+     -d '{"program_id":"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"}' | jq
    ```
 
    ```json
    {
      "data": {
-       "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
+       "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
        "status": "schema_created",
        "schema_name": "jupiter_v6_jup6lkmu"
      }
@@ -217,16 +217,16 @@ For the full architecture deep-dive, see [docs/architecture.md](docs/architectur
 
    ```bash
    # Decoded swap instructions (cursor-paginated)
-   curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?limit=5" | jq
+   curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?limit=5" | jq
 
    # Filter: swaps where in_amount > 1 SOL (1,000,000,000 lamports)
-   curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?filter=data.in_amount_gt=1000000000&limit=10" | jq
+   curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?filter=data.in_amount_gt=1000000000&limit=10" | jq
 
    # Time-series swap count by hour
-   curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route/count?interval=hour" | jq
+   curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route/count?interval=hour" | jq
 
    # Indexing statistics
-   curl -s http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/stats | jq
+   curl -s http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/stats | jq
    ```
 
 5. Run the automated end-to-end demo:
@@ -288,20 +288,20 @@ Base URL: `http://localhost:3000`
 # Register a program
 curl -s -X POST http://localhost:3000/api/programs \
   -H "Content-Type: application/json" \
-  -d '{"program_id":"JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL"}' | jq
+  -d '{"program_id":"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"}' | jq
 # {
 #   "data": {
-#     "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
+#     "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
 #     "status": "schema_created",
 #     "schema_name": "jupiter_v6_jup6lkmu"
 #   }
 # }
 
 # Indexing statistics
-curl -s http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/stats | jq
+curl -s http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/stats | jq
 # {
 #   "data": {
-#     "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
+#     "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
 #     "total_instructions": 142831,
 #     "total_accounts": 9204,
 #     "last_processed_slot": 318472910
@@ -322,19 +322,19 @@ curl -s http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVML
 
 ```bash
 # Query decoded swap instructions (cursor pagination)
-curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?limit=5" | jq
+curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?limit=5" | jq
 
 # Filter: swaps with in_amount > 1 SOL
-curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?filter=data.in_amount_gt=1000000000&limit=10" | jq
+curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?filter=data.in_amount_gt=1000000000&limit=10" | jq
 
 # Time-series count by hour
-curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route/count?interval=hour" | jq
+curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route/count?interval=hour" | jq
 
 # List account types
-curl -s http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/accounts | jq
+curl -s http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/accounts | jq
 
 # Query accounts with offset pagination
-curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/accounts/TokenLedger?limit=5&offset=0" | jq
+curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/accounts/TokenLedger?limit=5&offset=0" | jq
 ```
 
 ### Observability
@@ -348,11 +348,11 @@ curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVM
 # Health check
 curl -s http://localhost:3000/health | jq
 # {
-#   "status": "ok",
+#   "status": "healthy",
 #   "database": "connected",
 #   "programs": [
 #     {
-#       "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
+#       "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
 #       "pipeline_status": "indexing",
 #       "last_processed_slot": 318472910
 #     }
@@ -403,7 +403,7 @@ Combine multiple filters with `&`:
 All errors return structured JSON:
 
 ```bash
-curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?filter=nonexistent_gt=1" | jq
+curl -s "http://localhost:3000/api/programs/JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4/instructions/route?filter=nonexistent_gt=1" | jq
 ```
 
 ```json
