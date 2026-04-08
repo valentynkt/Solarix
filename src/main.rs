@@ -13,6 +13,7 @@ use solarix::idl::IdlManager;
 use solarix::pipeline::update_indexer_state;
 use solarix::registry::ProgramRegistry;
 use solarix::runtime_stats::RuntimeStats;
+use solarix::startup::{query_registered_programs, StartupProgram};
 use solarix::storage::StorageError;
 
 /// Top-level error type so `main` can return a `Result` and let the runtime
@@ -414,81 +415,6 @@ async fn read_shutdown_totals(
             (0, 0, "unknown".to_string())
         }
     }
-}
-
-/// Registered program info loaded from DB at startup.
-struct StartupProgram {
-    program_id: String,
-    schema_name: String,
-    idl: anchor_lang_idl_spec::Idl,
-    /// Raw IDL JSON bytes as stored in `programs.idl_json`. Carried through
-    /// to the cache seeding step so the in-memory cache holds the same bytes
-    /// the hash was computed from. Story 4.4 AC5.
-    idl_json: String,
-}
-
-/// Query the programs table for programs with persisted IDL JSON.
-///
-/// Returns programs with `status = 'schema_created'` and a non-null `idl_json` column,
-/// parsing the IDL JSON into the `Idl` type for pipeline use.
-///
-/// A DB error is propagated as `StorageError::QueryFailed` so the supervisor
-/// sees a non-zero exit instead of a silent "no programs" startup.
-async fn query_registered_programs(pool: &PgPool) -> Result<Vec<StartupProgram>, StorageError> {
-    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
-        r#"SELECT "program_id", "schema_name", "idl_json" FROM "programs"
-           WHERE "status" = 'schema_created'
-           ORDER BY "program_id" ASC"#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        error!(error = %e, "failed to query programs table");
-        StorageError::QueryFailed(format!("programs lookup failed: {e}"))
-    })?;
-
-    let row_count = rows.len();
-    if row_count == 0 {
-        return Ok(Vec::new());
-    }
-
-    info!(count = row_count, "found registered program rows in DB");
-
-    let mut programs = Vec::new();
-    for (program_id, schema_name, idl_json) in rows {
-        let Some(json) = idl_json else {
-            warn!(program_id = %program_id, "program has no persisted idl_json, skipping pipeline auto-start");
-            continue;
-        };
-        match serde_json::from_str::<anchor_lang_idl_spec::Idl>(&json) {
-            Ok(idl) => {
-                info!(program_id = %program_id, schema_name = %schema_name, "loaded persisted IDL");
-                programs.push(StartupProgram {
-                    program_id,
-                    schema_name,
-                    idl,
-                    idl_json: json,
-                });
-            }
-            Err(e) => {
-                warn!(program_id = %program_id, error = %e, "failed to parse persisted IDL JSON");
-            }
-        }
-    }
-
-    if programs.is_empty() && row_count > 0 {
-        error!(
-            row_count,
-            "all registered programs failed to load IDL JSON; pipeline will not auto-start"
-        );
-    } else {
-        info!(
-            loaded = programs.len(),
-            row_count, "loaded persisted IDLs for pipeline auto-start"
-        );
-    }
-
-    Ok(programs)
 }
 
 /// Final shutdown sequence: update indexer_state and close pool.

@@ -5,6 +5,7 @@ pub mod idl;
 pub mod pipeline;
 pub mod registry;
 pub mod runtime_stats;
+pub mod startup;
 pub mod storage;
 pub mod types;
 

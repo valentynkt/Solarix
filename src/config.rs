@@ -123,11 +123,11 @@ pub struct Config {
     pub log_format: String,
 }
 
-#[cfg(test)]
 impl Config {
-    /// Construct a Config with test-friendly defaults. Test-only helper to
-    /// avoid every module that consumes Config duplicating field-by-field
-    /// initializers in its test module.
+    /// Test-friendly default Config used by both unit tests (via `#[cfg(test)]`
+    /// modules) and integration tests in `tests/*.rs`. Exposed unconditionally
+    /// so `tests/common/api.rs::build_test_state` can call
+    /// `solarix::config::Config::test_default()` when constructing `AppState`.
     pub fn test_default() -> Self {
         Self {
             rpc_url: String::new(),

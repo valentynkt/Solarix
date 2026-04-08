@@ -93,6 +93,24 @@ of rolling their own connection setup. The harness:
 The non-mainnet integration suite is budgeted to run end-to-end in **under
 90 seconds** on a developer laptop with the docker image cached.
 
+### API Endpoint Tests
+
+`tests/api_endpoints.rs` covers all 12 router endpoints (happy path, error
+path, pagination, filter validation) using `tower::ServiceExt::oneshot` as
+the test transport. Each test calls `build_test_router(pool)` from
+`tests/common/api.rs` to get a fresh router bound to a per-test DB container.
+
+Note: `axum-test 16.x` targets axum 0.7 while this project is on axum 0.8 —
+`Router<S>` from the newer axum does not implement axum-test's
+`IntoTransportLayer`. The `oneshot` approach is the stable alternative; do
+**not** add `axum-test` to `[dev-dependencies]`.
+
+Run the API test suite in isolation:
+
+```bash
+cargo test --release --tests --features integration --test api_endpoints
+```
+
 **Mainnet smoke test (nightly-only):**
 
 `tests/mainnet_smoke.rs` is gated behind the separate `mainnet-smoke` feature

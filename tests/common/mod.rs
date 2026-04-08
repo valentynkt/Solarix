@@ -11,6 +11,7 @@
 
 #![allow(dead_code)]
 
+pub mod api;
 pub mod decoder_fixtures;
 pub mod known_programs;
 
