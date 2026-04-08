@@ -1,3 +1,5 @@
+//! IDL-to-DDL generator: produces `CREATE TABLE` and `CREATE INDEX` from Anchor type definitions.
+
 // std library
 use std::collections::HashMap;
 use std::fmt::Write;

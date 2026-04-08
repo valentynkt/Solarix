@@ -1,3 +1,5 @@
+//! Query parameter parsing and operator validation against IDL field types.
+
 // std library
 use std::collections::HashMap;
 

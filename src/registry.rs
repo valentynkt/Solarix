@@ -1,3 +1,5 @@
+//! Program registration lifecycle: two-phase state machine from `Pending` to `Active`.
+
 // std library
 use std::future::Future;
 use std::pin::Pin;
@@ -68,6 +70,7 @@ pub struct ProgramRegistry {
 }
 
 impl ProgramRegistry {
+    /// Create a new `ProgramRegistry` wrapping the given `IdlManager`.
     pub fn new(idl_manager: IdlManager) -> Self {
         Self { idl_manager }
     }

@@ -1,3 +1,5 @@
+//! Batch `INSERT … UNNEST`, account upsert, and checkpoint management.
+
 // std library
 use std::collections::HashMap;
 use std::fmt::Write;

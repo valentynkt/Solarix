@@ -1,3 +1,5 @@
+//! IDL fetch cascade: on-chain PDA → bundled registry → manual upload.
+
 use std::io::Read;
 use std::path::Path;
 

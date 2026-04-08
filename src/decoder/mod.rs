@@ -1,3 +1,5 @@
+//! Borsh decoder via chainparser. Implements `SolarixDecoder` for 18+ Anchor IDL types.
+
 // std library
 use std::collections::HashMap;
 use std::sync::Mutex;

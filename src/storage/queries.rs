@@ -1,3 +1,5 @@
+//! Dynamic `QueryBuilder` for IDL-validated REST API filters.
+
 // external crates
 use serde_json;
 use sqlx::postgres::Postgres;

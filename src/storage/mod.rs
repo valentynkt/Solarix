@@ -1,3 +1,5 @@
+//! Database pool initialisation and system table bootstrap.
+
 pub mod queries;
 pub mod schema;
 pub mod writer;

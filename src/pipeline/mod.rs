@@ -1,3 +1,5 @@
+//! Pipeline orchestrator: 5-state machine connecting the Read, Decode, and Store layers.
+
 pub mod rpc;
 pub mod ws;
 

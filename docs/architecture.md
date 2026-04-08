@@ -259,6 +259,54 @@ Checkpoints are updated atomically within the same transaction as block writes, 
 
 ## Module Boundaries
 
+### Source Modules (20 files)
+
+```
+src/
+  main.rs              Entry point: signal handling, pipeline + API startup
+  lib.rs               Public module declarations
+  config.rs            22 env vars via clap, validation
+  types.rs             DecodedInstruction, DecodedAccount, BlockData, TransactionData
+  registry.rs          Two-phase program registration state machine
+  runtime_stats.rs     Process-wide Arc<AtomicU64> counters (Story 6.1):
+                         rpc_requests_total, rpc_retries_total, decode_failures_total,
+                         instructions_written_total, accounts_written_total, ws_disconnects_total.
+                         Fed to Prometheus /metrics.
+  startup.rs           Constructs Router + AppState; extracted from main.rs for
+                         integration-test testability (Story 6.6).
+
+  idl/
+    mod.rs             IdlManager: cache, parse, validate (v0.30+ only)
+    fetch.rs           Fetch cascade: on-chain PDA -> bundled -> manual upload
+
+  decoder/
+    mod.rs             ChainparserDecoder: Borsh deserializer for 18+ IDL types
+
+  pipeline/
+    mod.rs             PipelineOrchestrator: 5-state machine, concurrent backfill+stream
+    rpc.rs             RPC client with rate limiting (governor) and retry (backon)
+    ws.rs              WebSocket logsSubscribe with dedup cache and heartbeat
+
+  storage/
+    mod.rs             DB pool init, system table bootstrap
+    schema.rs          IDL -> CREATE TABLE/INDEX DDL, promoted column detection
+    writer.rs          Batch INSERT...UNNEST, account upsert, checkpoint management
+    queries.rs         Dynamic query builder for API filters
+
+  api/
+    mod.rs             axum Router, AppState, ApiError -> HTTP status mapping
+    handlers.rs        13 endpoint handlers with pagination and cursor encoding
+    filters.rs         Filter parsing, operator validation against IDL
+    metrics.rs         MetricsState, install_recorder(), register_descriptions(),
+                         normalize helpers, /metrics handler (Story 6.2).
+```
+
+### Dependency Notes
+
+- `runtime_stats` is depended on by `main.rs`, `api/mod.rs`, and `pipeline/mod.rs`
+- `startup` is depended on by `main.rs` (and test harness)
+- `api/metrics` is depended on by `api/mod.rs`
+
 ### Trait Seams
 
 Four trait interfaces define the architectural boundaries. Each is mockable for unit testing:
@@ -625,6 +673,30 @@ Bounded `tokio::sync::mpsc` channels (capacity 256) provide backpressure between
 ```
 
 The `CancellationToken` from `tokio-util` propagates shutdown across all tasks. Configurable timeouts prevent hung shutdown.
+
+---
+
+## Observability
+
+### Structured Logging
+
+`tracing` + `tracing-subscriber` with a JSON formatter in production (`SOLARIX_LOG_FORMAT=json`) and a pretty formatter for development. Every log event carries stable fields defined in `docs/operating-solarix.md`.
+
+### Request ID Propagation
+
+`tower-http` `SetRequestId` middleware injects a UUIDv7 `x-request-id` header on every inbound request. The ID is propagated into the active span and appears in all log events produced during that request's lifetime.
+
+### Span Instrumentation
+
+`#[tracing::instrument]` on every significant async function. Naming convention: `module.function` (e.g. `pipeline.orchestrator`, `storage.writer.write_block`, `api.handlers.query_instructions`). Result-returning functions carry `err(Display)` or `err(Debug)`.
+
+### Log-Level Discipline
+
+Every `warn!` and `error!` in `pipeline/` carries `program_id`. Enforced by `tests/log_levels.rs`.
+
+### Prometheus Metrics
+
+`RuntimeStats` (`Arc<AtomicU64>` counters in `AppState`) is read by `src/api/metrics.rs` to render the `/metrics` Prometheus endpoint. Enabled via `SOLARIX_METRICS_ENABLED=true`. See `docs/metrics.md` for the full metric inventory.
 
 ---
 

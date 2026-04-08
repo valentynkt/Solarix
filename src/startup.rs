@@ -1,3 +1,5 @@
+//! Router and `AppState` construction, extracted from `main.rs` for testability.
+
 // Startup helpers promoted from `src/main.rs` (Story 6.6 AC9 Part A).
 //
 // These items lived as private functions in the binary crate and could not be

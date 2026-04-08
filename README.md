@@ -3,132 +3,90 @@
 [![CI](https://github.com/valentynkt/Solarix/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/valentynkt/Solarix/actions/workflows/ci.yml)
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-orange.svg)](rust-toolchain.toml)
 
-**Universal Solana indexer** that dynamically generates PostgreSQL schemas from any Anchor IDL at runtime.
-
-No codegen. No recompile. No redeploy. Give it a program ID and it fetches the IDL, creates typed tables, indexes transactions and account states, and exposes a REST API for queries.
+Solarix is a universal Solana indexer built in Rust. Give it any Anchor program ID and it fetches the IDL directly from the blockchain, generates a typed PostgreSQL schema at runtime — no codegen, no recompile, no redeploy — then begins indexing transactions and account states through a concurrent backfill-plus-streaming pipeline. Decoded data is immediately queryable through a 13-endpoint REST API with typed filters, cursor pagination, and time-series aggregations. Built for the [Superteam Ukraine bounty](https://earn.superteam.fun/) (Middle level, 500 USDG).
 
 ```
-POST /api/programs  { "program_id": "TokenkegQ..." }
+POST /api/programs  { "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL" }
 
     Solarix:  fetch IDL on-chain  -->  CREATE SCHEMA + TABLES  -->  backfill + stream  -->  query API ready
 ```
 
-Built in Rust for the [Superteam Ukraine bounty](https://earn.superteam.fun/) (Middle level, 500 USDG).
-
 ---
 
-## Features
+## Table of Contents
 
-| Category                   | What it does                                                                                                  |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| **Dynamic schema**         | Parses any Anchor IDL (v0.30+) at runtime and generates PostgreSQL tables with typed columns + JSONB fallback |
-| **Zero-config indexing**   | Auto-fetches IDL from on-chain PDA, falls back to bundled registry, or accepts manual upload                  |
-| **Batch + real-time**      | Concurrent historical backfill (HTTP RPC) and live streaming (WebSocket `logsSubscribe`)                      |
-| **Cold start recovery**    | Checkpoint-based crash recovery with automatic gap detection and mini-backfill                                |
-| **12-endpoint REST API**   | Program management, instruction/account queries, filters, aggregations, stats                                 |
-| **Production reliability** | Rate limiting, exponential backoff with jitter, graceful shutdown (SIGTERM/SIGINT), signature dedup           |
-| **Strict Rust**            | `unsafe` forbidden, `unwrap`/`expect`/`panic` denied by clippy, `thiserror` enums everywhere                  |
-
----
-
-## Quick Start
-
-### Docker Compose (recommended)
-
-```bash
-git clone https://github.com/valentynkit/solarix.git
-cd solarix
-docker compose up --build
-```
-
-This starts PostgreSQL 16 + Solarix. The API is available at `http://localhost:3000` once the health check passes.
-
-### Register a Program
-
-```bash
-# Register any Anchor program by its program ID
-curl -s -X POST http://localhost:3000/api/programs \
-  -H "Content-Type: application/json" \
-  -d '{"program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL"}' | jq
-```
-
-```json
-{
-  "data": {
-    "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
-    "status": "schema_created",
-    "schema_name": "jupiter_v6_jup6lkmu"
-  }
-}
-```
-
-Solarix fetches the IDL from on-chain, generates a PostgreSQL schema with typed tables for each account type and a unified instructions table, then begins indexing.
-
-### Query Indexed Data
-
-```bash
-# List all account types for a program
-curl -s http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/accounts | jq
-
-# Query accounts with filters
-curl -s "http://localhost:3000/api/programs/JUP6.../accounts/Pool?filter=data.token_a_amount_gt=1000000&limit=10" | jq
-
-# Query instructions
-curl -s "http://localhost:3000/api/programs/JUP6.../instructions/swap?limit=5" | jq
-
-# Program statistics
-curl -s http://localhost:3000/api/programs/JUP6.../stats | jq
-
-# Health check (includes per-program indexing status)
-curl -s http://localhost:3000/health | jq
-```
+- [Architecture](#architecture)
+- [Technology Stack](#technology-stack)
+- [Quick Start](#quick-start)
+- [API Reference](#api-reference)
+- [Configuration](#configuration)
+- [Architectural Decisions](#architectural-decisions)
+- [Testing](#testing)
+- [Future Work](#future-work)
+- [License](#license)
 
 ---
 
 ## Architecture
 
-Four-layer pipeline connected by bounded Tokio channels:
+```mermaid
+flowchart LR
+    RPC["Solana RPC<br/>HTTP JSON-RPC"]
+    WS["Solana WS<br/>logsSubscribe"]
 
-```
-                        READ                    DECODE                  STORE                SERVE
-               ┌───────────────────┐   ┌───────────────────┐   ┌──────────────────┐   ┌──────────────┐
-               │  HTTP RPC         │   │                   │   │  StorageWriter   │   │  REST API    │
-Solana ──────► │  getBlock         ├──►│  Borsh Decoder    ├──►│  batch INSERT    ├──►│  axum        │ ◄── Clients
-  RPC          │  getProgramAccts  │   │  IDL type         │   │  account upsert  │   │  12 endpoints│
-               ├───────────────────┤   │  registry         │   │                  │   │  filters     │
-               │  WebSocket        │   │                   │   │                  │   │  pagination  │
-Solana ──────► │  logsSubscribe    ├──►│                   ├──►│                  │   │              │
-  WS           └───────────────────┘   └───────────────────┘   └────────┬─────────┘   └──────┬───────┘
-                                                                        │                     │
-                                                                        ▼                     │
-                                                                ┌──────────────────┐          │
-                                                                │   PostgreSQL 16  │ ◄────────┘
-                                                                │   typed + JSONB  │
-                                                                └──────────────────┘
-```
+    subgraph READ["Read Layer"]
+        R1[RpcClient]
+        R2[WsTransactionStream]
+    end
 
-### Pipeline State Machine
+    subgraph DECODE["Decode Layer"]
+        D1["ChainparserDecoder<br/>Borsh to JSON"]
+    end
 
-```
-                              checkpoint < tip
-              ┌──────────────┐ ──────────────► ┌──────────────┐
-              │ Initializing │                 │ Backfilling  │
-              └──────┬───────┘                 └──────┬───────┘
-                     │ no gap                   caught up │
-                     ▼                                    ▼
-              ┌──────────────┐   gap detected   ┌──────────────┐
-              │              │ ◄──────────────── │              │
-              │  Streaming   │                   │  CatchingUp  │
-              │              │ ──────────────► │              │
-              └──────┬───────┘   gap filled     └──────────────┘
-                     │ SIGTERM
-                     ▼
-              ┌──────────────┐
-              │ ShuttingDown │
-              └──────────────┘
+    subgraph STORE["Store Layer"]
+        S1["StorageWriter<br/>batch INSERT + upsert"]
+    end
+
+    subgraph SERVE["Serve Layer"]
+        A1["axum Router<br/>13 endpoints"]
+    end
+
+    PG[("PostgreSQL 16<br/>typed + JSONB")]
+    CLI["REST Clients"]
+
+    RPC -->|getBlock| R1
+    WS -->|logsSubscribe| R2
+    R1 -->|"mpsc (256)"| D1
+    R2 -->|"mpsc (256)"| D1
+    D1 -->|"mpsc (256)"| S1
+    S1 --> PG
+    PG --> A1
+    A1 --> CLI
 ```
 
-During cold start, Solarix runs backfill and streaming **concurrently** (Option C). Both write to the same tables with `INSERT ON CONFLICT DO NOTHING`, so duplicate processing is harmless and crash recovery is automatic.
+The pipeline has four layers connected by bounded Tokio channels (capacity 256). Solana data enters through HTTP RPC (for historical blocks) and WebSocket (for live transactions), flows through the Borsh decoder, gets written to PostgreSQL, and is served by the axum REST API.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Initializing
+
+    Initializing --> Backfilling : checkpoint behind chain tip
+    Initializing --> Streaming : no gap detected
+
+    Backfilling --> Streaming : caught up to tip
+
+    Streaming --> CatchingUp : gap detected
+    CatchingUp --> Streaming : gap filled
+
+    Streaming --> ShuttingDown : SIGTERM or SIGINT
+    ShuttingDown --> [*] : drain channels, flush DB
+```
+
+The pipeline starts in `Initializing`, transitions to `Backfilling` if there is a historical gap, then enters `Streaming`. A WebSocket slot gap triggers `CatchingUp` for a mini-backfill. `SIGTERM` begins a graceful shutdown: in-flight messages drain, final writes flush to PostgreSQL.
+
+### Cold Start Strategy
+
+On cold start, Solarix runs backfill and streaming **concurrently** (Option C). Both write to the same tables with `INSERT ON CONFLICT DO NOTHING`, so duplicate processing is harmless and crash recovery is automatic. Live data is available immediately while historical backfill catches up in the background.
 
 ### Database Layout
 
@@ -148,9 +106,167 @@ public/
   _metadata         -- field names and types from IDL
 ```
 
-**Hybrid column strategy**: simple scalars (u64, bool, String, Pubkey) are promoted to native PostgreSQL columns for fast filtering. Complex types (structs, vecs) live in the JSONB `data` column with GIN indexes.
+Simple scalars (`u64`, `bool`, `String`, `Pubkey`) are promoted to native PostgreSQL columns for fast indexed queries. Complex nested types live in a JSONB `data` column with GIN indexes. Every field is preserved regardless of promotion — there is no data loss on schema generation.
+
+<details>
+<summary>Source module tree (20 modules, 14,109 lines)</summary>
+
+```
+src/
+  main.rs              Entry point: signal handling, pipeline + API startup
+  lib.rs               Public module declarations
+  config.rs            22 env vars via clap, validation
+  types.rs             DecodedInstruction, DecodedAccount, BlockData, TransactionData
+  registry.rs          Two-phase program registration state machine
+  runtime_stats.rs     Process-wide atomic counters for Prometheus metrics
+  startup.rs           Router + AppState construction, extracted for testability
+
+  idl/
+    mod.rs             IdlManager: cache, parse, validate (v0.30+ only)
+    fetch.rs           Fetch cascade: on-chain PDA -> bundled -> manual upload
+
+  decoder/
+    mod.rs             ChainparserDecoder: Borsh deserializer for 18+ IDL types
+
+  pipeline/
+    mod.rs             PipelineOrchestrator: 5-state machine, concurrent backfill+stream
+    rpc.rs             RPC client with rate limiting (governor) and retry (backon)
+    ws.rs              WebSocket logsSubscribe with dedup cache and heartbeat
+
+  storage/
+    mod.rs             DB pool init, system table bootstrap
+    schema.rs          IDL -> CREATE TABLE/INDEX DDL, promoted column detection
+    writer.rs          Batch INSERT...UNNEST, account upsert, checkpoint management
+    queries.rs         Dynamic query builder for API filters
+
+  api/
+    mod.rs             axum Router, AppState, ApiError -> HTTP status mapping
+    handlers.rs        13 endpoint handlers with pagination and cursor encoding
+    filters.rs         Filter parsing, operator validation against IDL
+```
+
+</details>
 
 For the full architecture deep-dive, see [docs/architecture.md](docs/architecture.md).
+
+---
+
+## Technology Stack
+
+| Crate                                     | Version     | Purpose                                       |
+| ----------------------------------------- | ----------- | --------------------------------------------- |
+| `axum`                                    | 0.8         | HTTP framework and router                     |
+| `sqlx`                                    | 0.8         | Async PostgreSQL driver                       |
+| `tokio`                                   | 1 (latest)  | Async runtime                                 |
+| `anchor-lang-idl-spec`                    | 0.1         | Anchor IDL type definitions                   |
+| `tokio-tungstenite`                       | 0.26        | WebSocket client for `logsSubscribe`          |
+| `governor`                                | 0.10        | Async GCRA rate limiting                      |
+| `backon`                                  | 1           | Exponential backoff retry                     |
+| `thiserror`                               | 2           | Typed error enums                             |
+| `tracing` + `tracing-subscriber`          | 0.1         | Structured logging (JSON + pretty)            |
+| `metrics` + `metrics-exporter-prometheus` | 0.24 / 0.17 | Prometheus metrics endpoint                   |
+| `clap`                                    | 4           | CLI and environment variable configuration    |
+| `sha2`                                    | 0.10        | Instruction/account discriminator computation |
+| `flate2`                                  | 1           | IDL zlib decompression                        |
+| `tower-http`                              | 0.6         | Request ID propagation and tracing middleware |
+
+---
+
+## Quick Start
+
+### Docker Compose (Recommended)
+
+1. Clone the repository and enter the directory:
+
+   ```bash
+   git clone https://github.com/valentynkit/solarix.git
+   cd solarix
+   ```
+
+2. Start the full stack (PostgreSQL 16 + Solarix):
+
+   ```bash
+   docker compose up --build
+   ```
+
+   Verify the API is ready:
+
+   ```bash
+   curl -s http://localhost:3000/health | jq
+   ```
+
+3. Register a program — Solarix fetches the IDL on-chain, creates the schema, and starts indexing:
+
+   ```bash
+   curl -s -X POST http://localhost:3000/api/programs \
+     -H "Content-Type: application/json" \
+     -d '{"program_id":"JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL"}' | jq
+   ```
+
+   ```json
+   {
+     "data": {
+       "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
+       "status": "schema_created",
+       "schema_name": "jupiter_v6_jup6lkmu"
+     }
+   }
+   ```
+
+4. Query decoded data once indexing begins:
+
+   ```bash
+   # Decoded swap instructions (cursor-paginated)
+   curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?limit=5" | jq
+
+   # Filter: swaps where in_amount > 1 SOL (1,000,000,000 lamports)
+   curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?filter=data.in_amount_gt=1000000000&limit=10" | jq
+
+   # Time-series swap count by hour
+   curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route/count?interval=hour" | jq
+
+   # Indexing statistics
+   curl -s http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/stats | jq
+   ```
+
+5. Run the automated end-to-end demo:
+   ```bash
+   bash demo.sh
+   ```
+
+### Local Development (No Docker)
+
+Start a local PostgreSQL instance:
+
+```bash
+docker run -d --name solarix-db \
+  -e POSTGRES_DB=solarix \
+  -e POSTGRES_USER=solarix \
+  -e POSTGRES_PASSWORD=solarix \
+  -p 5432:5432 \
+  postgres:16
+```
+
+Configure environment variables and run:
+
+```bash
+export DATABASE_URL="postgres://solarix:solarix@localhost:5432/solarix"
+export SOLANA_RPC_URL="https://api.devnet.solana.com"
+cargo run
+```
+
+Build, test, and lint:
+
+```bash
+cargo build              # debug build
+cargo build --release    # optimized build
+cargo watch -x run       # hot-reload during development
+
+cargo test               # 383 tests across all suites (MSRV 1.88)
+cargo test --features integration   # integration tests (requires Docker)
+cargo clippy             # strict lints (unwrap/expect/panic denied)
+cargo fmt -- --check     # formatting check
+```
 
 ---
 
@@ -165,61 +281,137 @@ Base URL: `http://localhost:3000`
 | `POST`   | `/api/programs`                       | Register a program (auto-fetches IDL or accepts manual upload) |
 | `GET`    | `/api/programs`                       | List all registered programs                                   |
 | `GET`    | `/api/programs/{id}`                  | Get program details and schema info                            |
-| `DELETE` | `/api/programs/{id}?drop_tables=true` | Deregister program (optionally drop schema)                    |
+| `DELETE` | `/api/programs/{id}?drop_tables=true` | Deregister a program (optionally drop its schema)              |
 | `GET`    | `/api/programs/{id}/stats`            | Indexing statistics (total instructions, accounts, last slot)  |
 
-### Instructions
+```bash
+# Register a program
+curl -s -X POST http://localhost:3000/api/programs \
+  -H "Content-Type: application/json" \
+  -d '{"program_id":"JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL"}' | jq
+# {
+#   "data": {
+#     "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
+#     "status": "schema_created",
+#     "schema_name": "jupiter_v6_jup6lkmu"
+#   }
+# }
 
-| Method | Endpoint                                       | Description                             |
-| ------ | ---------------------------------------------- | --------------------------------------- |
-| `GET`  | `/api/programs/{id}/instructions`              | List instruction types from IDL         |
-| `GET`  | `/api/programs/{id}/instructions/{name}`       | Query decoded instructions with filters |
-| `GET`  | `/api/programs/{id}/instructions/{name}/count` | Count instructions matching filters     |
+# Indexing statistics
+curl -s http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/stats | jq
+# {
+#   "data": {
+#     "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
+#     "total_instructions": 142831,
+#     "total_accounts": 9204,
+#     "last_processed_slot": 318472910
+#   }
+# }
+```
 
-### Accounts
+### Instructions & Accounts
 
-| Method | Endpoint                                      | Description                         |
-| ------ | --------------------------------------------- | ----------------------------------- |
-| `GET`  | `/api/programs/{id}/accounts`                 | List account types from IDL         |
-| `GET`  | `/api/programs/{id}/accounts/{type}`          | Query decoded accounts with filters |
-| `GET`  | `/api/programs/{id}/accounts/{type}/{pubkey}` | Get a single account by pubkey      |
+| Method | Endpoint                                       | Description                                     |
+| ------ | ---------------------------------------------- | ----------------------------------------------- |
+| `GET`  | `/api/programs/{id}/instructions`              | List instruction types from IDL                 |
+| `GET`  | `/api/programs/{id}/instructions/{name}`       | Query decoded instructions with filters         |
+| `GET`  | `/api/programs/{id}/instructions/{name}/count` | Count instructions, optionally by time interval |
+| `GET`  | `/api/programs/{id}/accounts`                  | List account types from IDL                     |
+| `GET`  | `/api/programs/{id}/accounts/{type}`           | Query decoded accounts with filters             |
+| `GET`  | `/api/programs/{id}/accounts/{type}/{pubkey}`  | Get a single account by pubkey                  |
 
-### Health
+```bash
+# Query decoded swap instructions (cursor pagination)
+curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?limit=5" | jq
 
-| Method | Endpoint  | Description                                                        |
-| ------ | --------- | ------------------------------------------------------------------ |
-| `GET`  | `/health` | System health with DB connectivity and per-program pipeline status |
+# Filter: swaps with in_amount > 1 SOL
+curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?filter=data.in_amount_gt=1000000000&limit=10" | jq
+
+# Time-series count by hour
+curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route/count?interval=hour" | jq
+
+# List account types
+curl -s http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/accounts | jq
+
+# Query accounts with offset pagination
+curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/accounts/TokenLedger?limit=5&offset=0" | jq
+```
+
+### Observability
+
+| Method | Endpoint   | Description                                                        |
+| ------ | ---------- | ------------------------------------------------------------------ |
+| `GET`  | `/health`  | System health with DB connectivity and per-program pipeline status |
+| `GET`  | `/metrics` | Prometheus metrics (requires `SOLARIX_METRICS_ENABLED=true`)       |
+
+```bash
+# Health check
+curl -s http://localhost:3000/health | jq
+# {
+#   "status": "ok",
+#   "database": "connected",
+#   "programs": [
+#     {
+#       "program_id": "JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL",
+#       "pipeline_status": "indexing",
+#       "last_processed_slot": 318472910
+#     }
+#   ]
+# }
+
+# Prometheus metrics (enable with SOLARIX_METRICS_ENABLED=true)
+curl -s http://localhost:3000/metrics | grep "^solarix_"
+```
 
 ### Filter Syntax
 
-Append `?filter=` to instruction and account query endpoints:
+Append `?filter=` to any instruction or account query endpoint:
 
+```bash
+?filter=data.amount_gt=1000000             # JSONB field, greater than
+?filter=data.authority_eq=So11111111111111111111111111111111111111112   # equals (full address)
+?filter=data.is_active_eq=true             # boolean
+?filter=slot_gt=300000000                  # promoted BIGINT column (no "data." prefix)
 ```
-# Comparison operators
-?filter=data.amount_gt=1000000
-?filter=data.authority_eq=So11111111111111111111111111111111111111112
-?filter=data.is_active_eq=true
 
-# Supported operators: _eq, _neq, _gt, _gte, _lt, _lte, _in, _like
-# Combine with AND: &filter=data.amount_gt=100&filter=data.owner_eq=...
+Combine multiple filters with `&`:
+
+```bash
+?filter=data.in_amount_gt=1000000000&filter=data.out_amount_lt=5000000000
 ```
+
+| Operator | Meaning                   |
+| -------- | ------------------------- |
+| `_eq`    | Equals                    |
+| `_neq`   | Not equals                |
+| `_gt`    | Greater than              |
+| `_gte`   | Greater than or equal     |
+| `_lt`    | Less than                 |
+| `_lte`   | Less than or equal        |
+| `_in`    | In list (comma-separated) |
+| `_like`  | SQL LIKE pattern          |
 
 ### Pagination
 
-```
+```bash
 ?limit=50&offset=0          # Offset-based (accounts)
-?limit=50&cursor=abc123     # Cursor-based (instructions)
+?limit=50&cursor=abc123     # Cursor-based (instructions, stable on append-only data)
 ```
 
 ### Error Responses
 
 All errors return structured JSON:
 
+```bash
+curl -s "http://localhost:3000/api/programs/JUP6LkMUje6dvM2FeAg8pUhfHayPdTHaFxVMLsXkICL/instructions/route?filter=nonexistent_gt=1" | jq
+```
+
 ```json
 {
   "error": {
-    "code": "PROGRAM_NOT_FOUND",
-    "message": "Program 'abc...' is not registered"
+    "code": "INVALID_FILTER",
+    "message": "Unknown field 'nonexistent'. Available: in_amount, out_amount, ...",
+    "available_fields": ["in_amount", "out_amount", "slippage_bps"]
   }
 }
 ```
@@ -238,216 +430,193 @@ All errors return structured JSON:
 
 ## Configuration
 
-All parameters are configured via environment variables (or CLI flags). Only `DATABASE_URL` is required.
+All parameters are configured via environment variables (or CLI flags). Copy `.env.example` to `.env` and customize. Only `DATABASE_URL` is required.
 
 ### Core
 
-| Variable         | Default                               | Description                            |
-| ---------------- | ------------------------------------- | -------------------------------------- |
-| `DATABASE_URL`   | _(required)_                          | PostgreSQL connection string           |
-| `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana JSON-RPC endpoint               |
-| `SOLANA_WS_URL`  | _(derived from RPC URL)_              | WebSocket endpoint for `logsSubscribe` |
+| Variable         | Type   | Default                               | Description                            |
+| ---------------- | ------ | ------------------------------------- | -------------------------------------- |
+| `DATABASE_URL`   | String | _(required)_                          | PostgreSQL connection string           |
+| `SOLANA_RPC_URL` | String | `https://api.mainnet-beta.solana.com` | Solana JSON-RPC endpoint               |
+| `SOLANA_WS_URL`  | String | _(derived from RPC URL)_              | WebSocket endpoint for `logsSubscribe` |
 
 ### Database
 
-| Variable              | Default | Description                  |
-| --------------------- | ------- | ---------------------------- |
-| `SOLARIX_DB_POOL_MIN` | `2`     | Minimum connection pool size |
-| `SOLARIX_DB_POOL_MAX` | `10`    | Maximum connection pool size |
+| Variable              | Type | Default | Description                  |
+| --------------------- | ---- | ------- | ---------------------------- |
+| `SOLARIX_DB_POOL_MIN` | u64  | `2`     | Minimum connection pool size |
+| `SOLARIX_DB_POOL_MAX` | u64  | `10`    | Maximum connection pool size |
 
 ### API
 
-| Variable                    | Default   | Description               |
-| --------------------------- | --------- | ------------------------- |
-| `SOLARIX_API_HOST`          | `0.0.0.0` | Bind address              |
-| `SOLARIX_API_PORT`          | `3000`    | Bind port                 |
-| `SOLARIX_API_PAGE_SIZE`     | `50`      | Default page size         |
-| `SOLARIX_API_MAX_PAGE_SIZE` | `1000`    | Maximum allowed page size |
+| Variable                    | Type   | Default   | Description               |
+| --------------------------- | ------ | --------- | ------------------------- |
+| `SOLARIX_API_HOST`          | String | `0.0.0.0` | Bind address              |
+| `SOLARIX_API_PORT`          | u64    | `3000`    | Bind port                 |
+| `SOLARIX_API_PAGE_SIZE`     | u64    | `50`      | Default page size         |
+| `SOLARIX_API_MAX_PAGE_SIZE` | u64    | `1000`    | Maximum allowed page size |
 
 ### Pipeline
 
-| Variable                           | Default  | Description                                  |
-| ---------------------------------- | -------- | -------------------------------------------- |
-| `SOLARIX_RPC_RPS`                  | `10`     | RPC rate limit (requests/second)             |
-| `SOLARIX_BACKFILL_CHUNK_SIZE`      | `50000`  | Slots per backfill batch                     |
-| `SOLARIX_START_SLOT`               | _(auto)_ | Override backfill start slot                 |
-| `SOLARIX_END_SLOT`                 | _(auto)_ | Override backfill end slot                   |
-| `SOLARIX_INDEX_FAILED_TXS`         | `false`  | Index failed transactions                    |
-| `SOLARIX_CHANNEL_CAPACITY`         | `256`    | Bounded channel size between pipeline stages |
-| `SOLARIX_CHECKPOINT_INTERVAL_SECS` | `10`     | Checkpoint persistence interval              |
+| Variable                           | Type    | Default  | Description                                  |
+| ---------------------------------- | ------- | -------- | -------------------------------------------- |
+| `SOLARIX_RPC_RPS`                  | u64     | `10`     | RPC rate limit (requests/second)             |
+| `SOLARIX_BACKFILL_CHUNK_SIZE`      | u64     | `50000`  | Slots per backfill batch                     |
+| `SOLARIX_START_SLOT`               | u64     | _(auto)_ | Override backfill start slot                 |
+| `SOLARIX_END_SLOT`                 | u64     | _(auto)_ | Override backfill end slot                   |
+| `SOLARIX_INDEX_FAILED_TXS`         | bool    | `false`  | Index failed transactions                    |
+| `SOLARIX_CHANNEL_CAPACITY`         | u64     | `256`    | Bounded channel size between pipeline stages |
+| `SOLARIX_CHECKPOINT_INTERVAL_SECS` | seconds | `10`     | Checkpoint persistence interval              |
 
-### Retry and Resilience
+### Retry & Resilience
 
-| Variable                                 | Default | Description                                 |
-| ---------------------------------------- | ------- | ------------------------------------------- |
-| `SOLARIX_RETRY_INITIAL_MS`               | `500`   | Initial retry backoff                       |
-| `SOLARIX_RETRY_MAX_MS`                   | `30000` | Maximum retry backoff                       |
-| `SOLARIX_RETRY_TIMEOUT_SECS`             | `300`   | Total retry timeout                         |
-| `SOLARIX_MAX_CONSECUTIVE_FETCH_FAILURES` | `100`   | Max consecutive RPC failures before halt    |
-| `SOLARIX_SHUTDOWN_DRAIN_SECS`            | `15`    | In-flight message drain timeout on shutdown |
-| `SOLARIX_SHUTDOWN_DB_FLUSH_SECS`         | `10`    | Final DB write timeout on shutdown          |
+| Variable                                 | Type    | Default | Description                                 |
+| ---------------------------------------- | ------- | ------- | ------------------------------------------- |
+| `SOLARIX_RETRY_INITIAL_MS`               | u64     | `500`   | Initial retry backoff (ms)                  |
+| `SOLARIX_RETRY_MAX_MS`                   | u64     | `30000` | Maximum retry backoff (ms)                  |
+| `SOLARIX_RETRY_TIMEOUT_SECS`             | seconds | `300`   | Total retry timeout before giving up        |
+| `SOLARIX_MAX_CONSECUTIVE_FETCH_FAILURES` | u64     | `100`   | Max consecutive RPC failures before halt    |
+| `SOLARIX_SHUTDOWN_DRAIN_SECS`            | seconds | `15`    | In-flight message drain timeout on shutdown |
+| `SOLARIX_SHUTDOWN_DB_FLUSH_SECS`         | seconds | `10`    | Final DB write timeout on shutdown          |
 
 ### WebSocket
 
-| Variable                        | Default | Description                    |
-| ------------------------------- | ------- | ------------------------------ |
-| `SOLARIX_WS_PING_INTERVAL_SECS` | `30`    | Heartbeat ping interval        |
-| `SOLARIX_WS_PONG_TIMEOUT_SECS`  | `10`    | Pong response timeout          |
-| `SOLARIX_DEDUP_CACHE_SIZE`      | `10000` | Signature dedup cache capacity |
+| Variable                        | Type    | Default | Description                    |
+| ------------------------------- | ------- | ------- | ------------------------------ |
+| `SOLARIX_WS_PING_INTERVAL_SECS` | seconds | `30`    | Heartbeat ping interval        |
+| `SOLARIX_WS_PONG_TIMEOUT_SECS`  | seconds | `10`    | Pong response timeout          |
+| `SOLARIX_DEDUP_CACHE_SIZE`      | u64     | `10000` | Signature dedup cache capacity |
 
 ### Logging
 
-| Variable             | Default | Description                                                  |
-| -------------------- | ------- | ------------------------------------------------------------ |
-| `SOLARIX_LOG_LEVEL`  | `info`  | Log level (trace, debug, info, warn, error)                  |
-| `SOLARIX_LOG_FORMAT` | `json`  | Log format (`json` for production, `pretty` for development) |
+| Variable             | Type   | Default | Description                                                  |
+| -------------------- | ------ | ------- | ------------------------------------------------------------ |
+| `SOLARIX_LOG_LEVEL`  | String | `info`  | Log level (`trace`, `debug`, `info`, `warn`, `error`)        |
+| `SOLARIX_LOG_FORMAT` | String | `json`  | Log format (`json` for production, `pretty` for development) |
+
+### Observability
+
+| Variable                  | Type   | Default    | Description                              |
+| ------------------------- | ------ | ---------- | ---------------------------------------- |
+| `SOLARIX_METRICS_ENABLED` | bool   | `false`    | Enable Prometheus `/metrics` endpoint    |
+| `SOLARIX_METRICS_PATH`    | String | `/metrics` | Path for the Prometheus metrics endpoint |
 
 ---
 
-## Development
+## Architectural Decisions
 
-### Prerequisites
+**1. Runtime schema generation**
 
-- Rust 1.75+ (2021 edition)
-- PostgreSQL 16
-- Docker (optional, for containerized setup)
+PostgreSQL DDL is generated directly from the Anchor IDL at program registration time — no code generation step required.
 
-### Build
+_Alternatives:_ compile-time codegen (anchor-gen, seahorse) requires a recompile and redeploy for every new program; predefined tables hardcode specific programs and break universality.
+
+_Why:_ Zero additional configuration. The IDL is the only input. Any Anchor program works on the first `POST /api/programs`.
+
+---
+
+**2. Hybrid typed + JSONB storage**
+
+Simple scalar fields (`u64`, `bool`, `Pubkey`, `String`) are promoted to native PostgreSQL columns with proper types. Complex types (structs, vecs, enums) live in a JSONB `data` column with a GIN index.
+
+_Alternatives:_ all-JSONB is simple but makes range queries slow and loses type coercion; fully normalised relational storage creates schema explosion for deeply nested types.
+
+_Why:_ Native columns give fast indexed queries on the most-filtered fields. JSONB fallback preserves every field regardless of type complexity, with no data loss on schema generation.
+
+---
+
+**3. Concurrent backfill + streaming (Option C)**
+
+On cold start, historical backfill (HTTP RPC) and live streaming (WebSocket) run simultaneously. Both write to the same tables with `INSERT ON CONFLICT DO NOTHING`.
+
+_Alternatives:_ sequential (backfill then stream) leaves a gap window and delays live data; streaming-only loses all historical data.
+
+_Why:_ Live data is available immediately. Idempotent writes make overlap harmless. Crash recovery is automatic — both paths resume from their checkpoints independently.
+
+---
+
+**4. Typed `thiserror` error enums**
+
+Five module-level error enums (`IdlError`, `DecodeError`, `StorageError`, `PipelineError`, `ApiError`) with explicit `is_retryable()` classification and `clippy::expect_used = "deny"`.
+
+_Alternatives:_ `anyhow` erases the type needed for retry classification; `Box<dyn Error>` requires string matching to distinguish retryable from fatal errors.
+
+_Why:_ The compiler enforces exhaustive error handling at every call site. Retry logic in the pipeline depends on typed classification. Zero `unwrap` in production paths.
+
+---
+
+**5. GCRA rate limiting via `governor`**
+
+All outbound RPC calls pass through an async-native Generic Cell Rate Algorithm limiter set to 10 RPS by default.
+
+_Alternatives:_ `sleep`-based throttle blocks the Tokio executor and wastes wall time; no rate limit causes 429 storms on public endpoints that corrupt backfill progress.
+
+_Why:_ `governor` is fully async (no blocking), precise, and handles the ~10 RPS public Solana RPC limit with configurable burst tolerance.
+
+---
+
+## Testing
+
+**Unit + Property Tests**
+
+Run the full unit and property-based test suite:
 
 ```bash
-cargo build              # debug build
-cargo build --release    # optimized release build
-cargo watch -x run       # hot-reload during development
+cargo test
 ```
 
-### Test
+The decoder is verified with `proptest`: it generates random values for all 18+ supported Anchor IDL types, Borsh-serialises them, decodes via `ChainparserDecoder`, and asserts the JSON output matches field-for-field. The full suite runs 383 tests across 21 suites.
+
+**Integration Tests (require Docker)**
+
+Integration tests spin up a PostgreSQL 16 container per test via Testcontainers:
 
 ```bash
-cargo test               # 251 tests across 5 suites
-cargo clippy             # strict lints (unwrap/expect/panic denied)
-cargo fmt -- --check     # formatting check
+cargo test --features integration
 ```
 
-### Continuous Integration
+Covers: schema generation against a real database, filter SQL execution (including the Sprint-4 BIGINT vs TEXT regression), the full register → decode → query roundtrip, and a LiteSVM end-to-end path that deploys a real Anchor program into an in-process Solana VM.
 
-Every push to `main` and every PR against `main` is gated by the
-[`ci.yml`](.github/workflows/ci.yml) GitHub Actions workflow. The pipeline runs
-nine jobs in parallel on `ubuntu-latest` (`lint`, `unit`, `integration`,
-`coverage`, `fuzz-smoke`, `security`, `docker-smoke`, `msrv`, and a
-`toolchain-matrix` over stable / beta) and targets an end-to-end runtime under
-12 minutes with a shared `Swatinem/rust-cache` key. A few jobs that depend on
-artifacts produced by later Epic-6 stories (the fuzz target, `/ready`,
-`/metrics`, the testcontainer harness, and the `mainnet-smoke` cargo feature)
-start life as **soft gates** — they sit behind `hashFiles(...)` guards and
-become hard gates automatically as soon as the dependency story lands. A
-separate [`nightly.yml`](.github/workflows/nightly.yml) workflow runs the
-mainnet smoke test on a daily cron so flaky external services never block a
-PR. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local-reproduction commands
-and [`docs/adr/0002-ci-pipeline.md`](docs/adr/0002-ci-pipeline.md) for the
-architecture rationale.
-
-### Local Setup (without Docker)
+**Mainnet Smoke (nightly CI)**
 
 ```bash
-# Start PostgreSQL
-docker run -d --name solarix-db \
-  -e POSTGRES_DB=solarix \
-  -e POSTGRES_USER=solarix \
-  -e POSTGRES_PASSWORD=solarix \
-  -p 5432:5432 \
-  postgres:16
-
-# Set environment
-export DATABASE_URL="postgres://solarix:solarix@localhost:5432/solarix"
-export SOLANA_RPC_URL="https://api.devnet.solana.com"
-
-# Run
-cargo run
+cargo test --release --features mainnet-smoke -- mainnet_smoke
 ```
+
+Run automatically by `.github/workflows/nightly.yml`. Not required for local development.
+
+**CI**
+
+Every push to `main` runs nine parallel jobs: lint, unit, integration, coverage, fuzz-smoke, security audit, docker smoke, MSRV check, and a toolchain matrix (stable + beta). See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 
-## Project Structure
+## Future Work
 
-```
-src/
-  main.rs               Entry point, signal handling, pipeline + API startup
-  lib.rs                Public module declarations
-  config.rs             22 env vars via clap, validation
-  types.rs              DecodedInstruction, DecodedAccount, BlockData, TransactionData
-  registry.rs           Two-phase program registration state machine
+### Planned
 
-  idl/
-    mod.rs              IdlManager: cache, parse, validate (v0.30+ only)
-    fetch.rs            Fetch cascade: on-chain PDA -> bundled -> manual upload
+These features are in active development:
 
-  decoder/
-    mod.rs              ChainparserDecoder: Borsh deserializer for 18+ IDL types
+- **Multi-program concurrent orchestration** — index multiple programs simultaneously with a shared rate limiter and per-program `JoinSet` lifecycle management
+- **Pipeline auto-start on API registration** — `POST /api/programs` immediately spawns the pipeline without requiring a service restart
 
-  pipeline/
-    mod.rs              PipelineOrchestrator: 5-state machine, concurrent backfill+stream
-    rpc.rs              RPC client with rate limiting (governor) and retry (backon)
-    ws.rs               WebSocket logsSubscribe with dedup cache and heartbeat
+### Post-Submission Ideas
 
-  storage/
-    mod.rs              DB pool init, system table bootstrap
-    schema.rs           IDL -> CREATE TABLE/INDEX DDL, promoted column detection
-    writer.rs           Batch INSERT...UNNEST, account upsert, checkpoint management
-    queries.rs          Dynamic query builder for API filters
-
-  api/
-    mod.rs              axum Router, AppState, ApiError -> HTTP status mapping
-    handlers.rs         12 endpoint handlers with pagination and cursor encoding
-    filters.rs          Filter parsing, operator validation against IDL
-```
-
-**~12,850 lines of Rust** | **251 tests** | **15 source modules**
-
----
-
-## Design Decisions
-
-### Why runtime schema generation?
-
-Competing indexers require codegen or predefined schemas. Solarix generates PostgreSQL DDL from Anchor IDLs at runtime, meaning you can add any program without touching code or restarting the service.
-
-### Why hybrid typed + JSONB columns?
-
-Simple scalar fields (u64, bool, Pubkey) are promoted to native PostgreSQL columns for fast indexed queries. Complex nested types go into a JSONB `data` column with GIN indexes. This balances query performance with schema flexibility.
-
-### Why concurrent backfill + streaming?
-
-On cold start, running backfill and streaming in parallel (Option C) means the indexer starts serving live data immediately while catching up on historical data. Both paths are idempotent (`INSERT ON CONFLICT DO NOTHING`), so duplicates are harmless.
-
-### Why `thiserror` everywhere?
-
-Five typed error enums (`IdlError`, `DecodeError`, `StorageError`, `PipelineError`, `ApiError`) with explicit classification (retryable / skip-and-log / fatal). No `anyhow`, no `unwrap`. The compiler enforces error handling at every boundary.
-
-### Why rate limiting in the client?
-
-Public Solana RPC endpoints are rate-limited to ~10 RPS. The `governor` crate provides async-native GCRA rate limiting, and `backon` handles exponential backoff with jitter. This prevents 429 errors and makes backfill reliable on free RPC endpoints.
-
----
-
-## Key Dependencies
-
-| Crate                  | Purpose                            |
-| ---------------------- | ---------------------------------- |
-| `axum` 0.8             | HTTP framework                     |
-| `sqlx` 0.8             | Async PostgreSQL driver            |
-| `tokio`                | Async runtime                      |
-| `anchor-lang-idl-spec` | Anchor IDL type definitions        |
-| `tokio-tungstenite`    | WebSocket client                   |
-| `governor`             | RPC rate limiting                  |
-| `backon`               | Retry with exponential backoff     |
-| `thiserror`            | Typed error enums                  |
-| `tracing`              | Structured logging (JSON + pretty) |
-| `clap`                 | CLI/env configuration              |
-| `sha2`                 | Discriminator computation          |
-| `flate2`               | IDL zlib decompression             |
+- **Geyser/gRPC plugin transport** — replace HTTP RPC polling with a Geyser plugin connection for lower-latency block delivery
+- **GraphQL query layer** — expose the same typed data through a GraphQL interface for richer client queries
+- **Schema evolution** — `ALTER TABLE` on IDL update when new fields are added to an existing program
+- **Grafana dashboard out-of-box** — bundle a preconfigured Grafana dashboard JSON for the Prometheus metrics
+- **Legacy Anchor IDL v0.29 support** — extend the fetch cascade for programs that predate the `metadata.spec` field
+- **Signature-list batch mode** — accept a list of transaction signatures for targeted backfill without slot-range scanning
+- **WebSocket backpressure metrics** — expose queue depth and drop rate through the `/metrics` endpoint
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+---
+
+_Built for the [Superteam Ukraine bounty](https://earn.superteam.fun/).
+Read the [build story](docs/x-thread.md)._

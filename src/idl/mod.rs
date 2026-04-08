@@ -1,3 +1,5 @@
+//! IDL management: in-memory cache, parsing, version detection, and type registry.
+
 pub mod fetch;
 
 use std::collections::{BTreeMap, HashMap};

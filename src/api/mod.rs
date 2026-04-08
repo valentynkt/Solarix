@@ -1,3 +1,5 @@
+//! axum `Router`, `AppState`, and `ApiError` → HTTP status mapping.
+
 pub mod filters;
 pub mod handlers;
 
@@ -26,9 +28,13 @@ use crate::runtime_stats::RuntimeStats;
 
 /// Shared application state passed to all handlers.
 pub struct AppState {
+    /// PostgreSQL connection pool shared across all handlers.
     pub pool: PgPool,
+    /// Instant when the server started, used for uptime reporting.
     pub start_time: Instant,
+    /// Shared program registry holding IDL caches and registration state.
     pub registry: Arc<RwLock<ProgramRegistry>>,
+    /// Parsed runtime configuration.
     pub config: Config,
     /// Process-wide counters. Story 6.2's `/metrics` handler will read these
     /// and emit Prometheus gauges without any refactor of the pipeline or

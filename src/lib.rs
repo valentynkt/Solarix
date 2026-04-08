@@ -1,3 +1,9 @@
+//! Solarix — universal Solana indexer.
+//!
+//! Dynamically generates typed PostgreSQL schemas from Anchor IDLs at runtime,
+//! then indexes transactions and account states through a four-layer pipeline:
+//! Read → Decode → Store → Serve.
+
 pub mod api;
 pub mod config;
 pub mod decoder;

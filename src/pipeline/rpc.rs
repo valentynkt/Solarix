@@ -1,3 +1,5 @@
+//! RPC `BlockSource` and `AccountSource` with GCRA rate limiting and exponential-backoff retry.
+
 // std library
 use std::num::NonZeroU32;
 use std::sync::Arc;

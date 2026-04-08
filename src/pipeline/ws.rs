@@ -1,3 +1,5 @@
+//! WebSocket `logsSubscribe` stream with heartbeat, auto-reconnect, and signature dedup.
+
 // std library
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
